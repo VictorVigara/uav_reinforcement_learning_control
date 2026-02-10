@@ -12,7 +12,8 @@ from utils import QuadState, normalize, denormalize
 class HoverEnv(gym.Env):
     """Quadrotor hovering environment."""
     def __init__(self, render_mode: str | None = None, max_motor_thrust: float = 13.0, yaw_torque_coeff: float = 0.0201,
-                 arm_length: float = 0.039799, max_episode_steps: int = 512):
+                 arm_length: float = 0.039799, max_episode_steps: int = 512,
+                 initial_state_bounds: Box | None = None, target_pos_bounds: Box | None = None):
         super().__init__()
         # Params
         self.max_motor_thrust = max_motor_thrust
@@ -21,14 +22,32 @@ class HoverEnv(gym.Env):
         self.max_episode_steps = max_episode_steps
         self.render_mode = render_mode
         self._viewer = None
-        
 
         # Define action and observation spaces here
         self.action_space = Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
         self.observation_space = Box(low=-1.0, high=1.0, shape=(12,), dtype=np.float32)
 
         # Physical observation bounds (before normalization)
+        # Indices 0-2: relative position (target - UAV), 3-5: attitude, 6-8: velocity, 9-11: angular velocity
         self._obs_bounds = Box(
+            low=np.array([-4, -4, -2, -np.pi, -np.pi, -np.pi, -10, -10, -10, -6*np.pi, -6*np.pi, -6*np.pi], dtype=np.float32),
+            high=np.array([4, 4, 2, np.pi, np.pi, np.pi, 10, 10, 10, 6*np.pi, 6*np.pi, 6*np.pi], dtype=np.float32),
+        )
+
+        # Bounds for randomizing initial UAV state each episode (12D: pos, att, vel, ang_vel)
+        self._initial_state_bounds = initial_state_bounds or Box(
+            low=np.array([-1.5, -1.5, 0.1, -0.3, -0.3, -0.3, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5], dtype=np.float32),
+            high=np.array([1.5, 1.5, 1.5, 0.3, 0.3, 0.3, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], dtype=np.float32),
+        )
+
+        # Bounds for randomizing target position each episode (3D position only)
+        self._target_pos_bounds = target_pos_bounds or Box(
+            low=np.array([-1.5, -1.5, 0.3], dtype=np.float32),
+            high=np.array([1.5, 1.5, 1.8], dtype=np.float32),
+        )
+
+        # Absolute state bounds for termination checks (position is absolute, not relative)
+        self._state_bounds = Box(
             low=np.array([-2, -2, 0.0, -np.pi, -np.pi, -np.pi, -10, -10, -10, -6*np.pi, -6*np.pi, -6*np.pi], dtype=np.float32),
             high=np.array([2, 2, 2, np.pi, np.pi, np.pi, 10, 10, 10, 6*np.pi, 6*np.pi, 6*np.pi], dtype=np.float32),
         )
@@ -52,12 +71,11 @@ class HoverEnv(gym.Env):
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
 
-        # Target state (hover at z=1m)
+        # Target state (randomized each episode in reset())
         self.target_state = QuadState()
-        self.target_state.state[2] = 1.0  # Set z position to 1 meter
 
         # State tracker
-        self._state = QuadState()
+        self._state = QuadState(self._obs_bounds)
         self.dt = self.model.opt.timestep  # 0.01s
         self.frame_skip = 1  # Control at 100Hz
         self._step_count = 0
@@ -87,23 +105,35 @@ class HoverEnv(gym.Env):
         return np.clip(F, 0.0, self.max_motor_thrust)
 
     def _get_obs(self) -> np.ndarray:
-        """Get current observation (normalized state)."""
-        # Only read base body state (ignore propeller joints)
+        """Get current observation (normalized).
+
+        Observation: [rel_pos (3), attitude (3), velocity (3), angular_velocity (3)]
+        where rel_pos = target_position - uav_position.
+        """
         self._state.set_from_mujoco(self.data.qpos[:7], self.data.qvel[:6])
         obs = self._state.vec()
+        # Replace absolute position with relative position (target - UAV)
+        obs[0:3] = self.target_state.position - self._state.position
         return normalize(obs, self._obs_bounds).astype(np.float32)
 
     def _get_reward(self) -> float:
         """Reward based on position error only, always positive so surviving = more reward."""
         pos_error = float(np.linalg.norm(self._state.position - self.target_state.position))
         return np.exp(-pos_error ** 2)
+
+    def set_state(self, qpos, qvel):
+        """Set the MuJoCo state directly to start simulation"""
+        self.data.qpos[:7] = qpos
+        self.data.qvel[:6] = qvel
+
+        mujoco.mj_forward(self.model, self.data)
     
     def _is_terminated(self) -> bool:
-        """Check if episode should terminate (state out of bounds or NaN)."""
+        """Check if episode should terminate (absolute state out of bounds or NaN)."""
         state_vec = self._state.vec()
         if not np.isfinite(state_vec).all():
             return True
-        if not self._obs_bounds.contains(state_vec):
+        if not self._state_bounds.contains(state_vec):
             return True
         return False
     
@@ -136,12 +166,13 @@ class HoverEnv(gym.Env):
         info = {
             "state": self._state.vec().copy(),
             "motor_commands": motor_commands.copy(),
+            "target": self.target_state.position.copy(),
         }
 
         return obs, reward, terminated, truncated, info
 
     def reset(self, seed: int | None = None, options: dict | None = None):
-        """Reset environment to initial hover state.
+        """Reset environment with randomized initial state and target.
 
         Args:
             seed: Random seed
@@ -156,17 +187,20 @@ class HoverEnv(gym.Env):
         # Reset MuJoCo state
         mujoco.mj_resetData(self.model, self.data)
 
-        # Set initial state (start at ground level)
+        # Randomize initial UAV state
         initial_state = QuadState()
+        initial_state.random_reset(self.np_random, self._initial_state_bounds)
         qpos, qvel = initial_state.get_mujoco_state()
-        # Only set base body state (first 7 qpos, first 6 qvel)
-        # Propeller joints remain at default (0)
-        self.data.qpos[:7] = qpos
-        self.data.qvel[:6] = qvel
-        mujoco.mj_forward(self.model, self.data)
+        self.set_state(qpos, qvel)
+
+        # Randomize target position (velocity and angular velocity stay zero)
+        self.target_state = QuadState()
+        self.target_state.state[0:3] = self.np_random.uniform(
+            self._target_pos_bounds.low, self._target_pos_bounds.high
+        ).astype(np.float32)
 
         obs = self._get_obs()
-        info = {"state": self._state.vec().copy()}
+        info = {"state": self._state.vec().copy(), "target": self.target_state.position.copy()}
 
         return obs, info
 

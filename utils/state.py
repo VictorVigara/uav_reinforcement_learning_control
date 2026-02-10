@@ -2,6 +2,8 @@
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+from gymnasium.spaces import Box
+
 
 
 class QuadState:
@@ -19,8 +21,9 @@ class QuadState:
 
     ROT_SEQ = "XYZ"  # Euler angle rotation sequence (intrinsic) - returns [roll, pitch, yaw]
 
-    def __init__(self):
+    def __init__(self, obs_bounds: Box | None = None):
         self.state = np.zeros(12, dtype=np.float32)
+        self.obs_bounds = obs_bounds
 
     def set_from_mujoco(self, qpos: np.ndarray, qvel: np.ndarray) -> None:
         """Set state from MuJoCo qpos/qvel arrays.
@@ -60,6 +63,13 @@ class QuadState:
         qvel = self.state[6:12].copy()
 
         return qpos, qvel
+    
+    def reset_uav_state(self, pos: np.ndarray, wxyz: np.ndarray, vel: np.ndarray, ang_vel: np.ndarray):
+        """Reset the UAV state directly."""
+        self.state[0:3] = pos
+        self.state[3:6] = Rotation.from_quat(wxyz[[1, 2, 3, 0]]).as_euler(self.ROT_SEQ.lower())
+        self.state[6:9] = vel
+        self.state[9:12] = ang_vel
 
     @property
     def position(self) -> np.ndarray:
@@ -76,6 +86,16 @@ class QuadState:
     @property
     def angular_velocity(self) -> np.ndarray:
         return self.state[9:12]
+
+    def random_reset(self, rng: np.random.Generator, bounds: Box) -> None:
+        """Reset state to random values uniformly sampled within bounds.
+
+        Args:
+            rng: NumPy random generator for reproducibility
+            bounds: Box with low/high arrays of shape (12,) defining
+                    [x, y, z, roll, pitch, yaw, vx, vy, vz, wx, wy, wz] ranges
+        """
+        self.state = rng.uniform(bounds.low, bounds.high).astype(np.float32)
 
     def vec(self) -> np.ndarray:
         """Return state as a 12D vector."""

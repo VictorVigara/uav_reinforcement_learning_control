@@ -12,7 +12,7 @@ from datetime import datetime
 
 def main():
     # Configuration
-    total_timesteps = 1000000  # 10 million timesteps
+    total_timesteps = 10000000  # 10 million timesteps
     n_envs = 16
     checkpoint_freq = 50_000
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
