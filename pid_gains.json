@@ -1,0 +1,59 @@
+{
+    "description": "Tuned cascaded PID gains for MuJoCo quadrotor hover (100% survival, reward ~384/512)",
+    "drone_params": {
+        "mass_kg": 0.3446,
+        "arm_length_m": 0.039799,
+        "Ixx": 6.44e-4,
+        "Iyy": 6.54e-4,
+        "Izz": 8.31e-4,
+        "com_offset_x_m": -0.00106,
+        "max_motor_thrust_N": 13.0,
+        "max_total_thrust_N": 52.0,
+        "yaw_torque_coeff": 0.0201
+    },
+    "position_xy": {
+        "kp": 2.0,
+        "kd": 3.0,
+        "ki": 0.2,
+        "notes": "PID on world-frame XY position error. Small I term assists convergence; rate I term handles the COM bias."
+    },
+    "position_z": {
+        "kp": 4.0,
+        "kd": 5.0,
+        "ki": 0.6,
+        "notes": "PID on altitude error with anti-windup (integral clamped to ±1.5)"
+    },
+    "attitude": {
+        "kp": 150.0,
+        "kd": 22.0,
+        "notes": "Attitude P generates desired body rates: ω_des = (Kp/Kd) * att_error"
+    },
+    "yaw": {
+        "kp": 50.0,
+        "kd": 15.0,
+        "notes": "Yaw P generates desired yaw rate: ω_des = (Kp/Kd) * yaw_error"
+    },
+    "rate": {
+        "ki_torque": 0.02,
+        "integral_max": 0.008,
+        "notes": "Rate PID with I term in torque space (N·m). Converges to ~3.3 mN·m on pitch to compensate COM offset torque (m*g*dx ≈ 3.6 mN·m)."
+    },
+    "limits": {
+        "axy_max": 3.5,
+        "az_min": -4.0,
+        "az_max": 10.0,
+        "tilt_max": 0.25,
+        "z_integral_max": 1.5,
+        "xy_integral_max": 0.3,
+        "torque_motor_fraction": 0.7,
+        "torque_abs_max": 0.05,
+        "yaw_torque_scale": 0.5,
+        "notes": "Motor-clipping-aware torque limit: max_tau = min(thrust/4 * 2*L*0.7, 0.05)"
+    },
+    "tuning_notes": {
+        "roll_sign": "des_roll = atan2(-ay_body, G+az) — negated because positive roll creates -Y force in XYZ Euler convention",
+        "thrust_feedforward": "thrust = mass*(G+az) / max(cos(roll)*cos(pitch), 0.5)",
+        "com_offset": "COM is -1.06mm in X, causing ~3.6 mN·m pitch torque bias. Rate I term and XY position I term eliminate steady-state errors.",
+        "performance": "100% survival (40/40 episodes), mean reward 414 ± 51. SS position error ~0.006m. SS pitch rate error 0.08 deg/s. err@200=0.28m, err@450=0.12m."
+    }
+}
