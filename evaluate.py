@@ -2,14 +2,16 @@
 
 import argparse
 import os
+import json
 import time
+from collections import deque
 import numpy as np
 import mujoco
 import mujoco.viewer
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 
-from envs import HoverEnv
+from envs import HoverEnv, get_wrapper
 
 
 def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots"):
@@ -117,6 +119,70 @@ def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots"):
     print(f"  Plot saved to {filepath}")
 
 
+def _update_visuals(viewer, drone_pos, target_pos, trail, pos_err):
+    """Update custom visualization elements in the MuJoCo viewer.
+
+    Draws:
+        - Green translucent sphere at target position
+        - Error line from drone to target (green=close, red=far)
+        - Blue trajectory trail showing recent flight path
+        - Ground shadow marker below the drone
+    """
+    scn = viewer.user_scn
+    scn.ngeom = 0  # reset custom geoms each frame
+
+    # 1. Target sphere (green, translucent)
+    if scn.ngeom < scn.maxgeom:
+        mujoco.mjv_initGeom(
+            scn.geoms[scn.ngeom],
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([0.05, 0, 0]),
+            pos=np.asarray(target_pos, dtype=np.float64),
+            mat=np.eye(3).flatten(),
+            rgba=np.array([0.2, 1.0, 0.2, 0.5]),
+        )
+        scn.ngeom += 1
+
+    # 2. Error line (drone → target), color-coded by distance
+    if scn.ngeom < scn.maxgeom:
+        mujoco.mjv_connector(
+            scn.geoms[scn.ngeom],
+            mujoco.mjtGeom.mjGEOM_LINE,
+            0.003,
+            np.asarray(drone_pos, dtype=np.float64),
+            np.asarray(target_pos, dtype=np.float64),
+        )
+        err_ratio = min(pos_err / 1.0, 1.0)
+        scn.geoms[scn.ngeom].rgba[:] = [err_ratio, 1.0 - err_ratio, 0.0, 0.8]
+        scn.ngeom += 1
+
+    # 3. Trajectory trail (blue dots)
+    for pt in trail:
+        if scn.ngeom >= scn.maxgeom:
+            break
+        mujoco.mjv_initGeom(
+            scn.geoms[scn.ngeom],
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([0.008, 0, 0]),
+            pos=np.asarray(pt, dtype=np.float64),
+            mat=np.eye(3).flatten(),
+            rgba=np.array([0.2, 0.5, 1.0, 0.4]),
+        )
+        scn.ngeom += 1
+
+    # 4. Ground shadow (small disc below drone)
+    if scn.ngeom < scn.maxgeom:
+        mujoco.mjv_initGeom(
+            scn.geoms[scn.ngeom],
+            type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+            size=np.array([0.04, 0.04, 0.001]),
+            pos=np.array([drone_pos[0], drone_pos[1], 0.001]),
+            mat=np.eye(3).flatten(),
+            rgba=np.array([0.3, 0.3, 0.3, 0.4]),
+        )
+        scn.ngeom += 1
+
+
 def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
              plot: bool = False):
     """Evaluate a trained policy.
@@ -134,8 +200,20 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
     # Resolve model directory for saving plots and description
     model_dir = os.path.dirname(os.path.abspath(model_path))
 
+    # Auto-detect wrapper from config.json
+    wrapper_cls = None
+    config_path = os.path.join(model_dir, "config.json")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            config = json.load(f)
+        wrapper_cls = get_wrapper(config.get("wrapper", "none"))
+        wrapper_name = config.get("wrapper", "none")
+        print(f"Wrapper: {wrapper_name}")
+
     # Create environment
     env = HoverEnv()
+    if wrapper_cls:
+        env = wrapper_cls(env)
 
     episode_rewards = []
     episode_lengths = []
@@ -145,6 +223,7 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
         total_reward = 0
         step_count = 0
         done = False
+        trail = deque(maxlen=200)
 
         # Data collection for plots
         ep_data = {
@@ -190,10 +269,16 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
                 ep_data["actions"].append(action.copy())
                 ep_data["rewards"].append(reward)
 
+            # Trail + visuals
+            drone_pos = info["state"][:3]
+            pos_err = float(np.linalg.norm(drone_pos - info["target"]))
+            if step_count % 5 == 0:
+                trail.append(drone_pos.copy())
+
             # Render
             if render and viewer is not None and viewer.is_running():
+                _update_visuals(viewer, drone_pos, info["target"], trail, pos_err)
                 viewer.sync()
-                # Sync with real time
                 time.sleep(env.dt * env.frame_skip)
             elif render and viewer is not None and not viewer.is_running():
                 break
