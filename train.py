@@ -9,13 +9,15 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 
-from envs import HoverEnv
+from envs import HoverEnv, RelPosActWrapper
 from datetime import datetime
+
+from envs.rate_wrapper import RateControlWrapper
 
 def main():
     # Configuration
     total_timesteps = 10000000  # 10 million timesteps
-    n_envs = 16
+    n_envs = 1
     checkpoint_freq = 50_000
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = f"./logs/{run_timestamp}"
@@ -24,16 +26,26 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(model_dir, exist_ok=True)
 
+    # Observation wrapper (set to None for base 12D obs, or a wrapper class)
+    # wrapper_cls = RelPosActWrapper
+    wrapper_cls = RateControlWrapper    # was RelPosActWrapper
+
+    wrapper_name = wrapper_cls.__name__ if wrapper_cls else "none"
+
+    def make_env():
+        env = HoverEnv()
+        if wrapper_cls:
+            env = wrapper_cls(env)
+        return env
+
     # Validate environment
     print("Validating environment...")
-    env = HoverEnv()
-    check_env(env)
+    check_env(make_env())
     print("Environment validation passed!")
-    env.close()
 
     # Create vectorized environments for parallel training
     print(f"Creating {n_envs} parallel environments...")
-    vec_env = make_vec_env(HoverEnv, n_envs=n_envs)
+    vec_env = make_vec_env(make_env, n_envs=n_envs)
 
     model = PPO(
         policy="MlpPolicy",
@@ -63,7 +75,7 @@ def main():
     )
 
     # Create evaluation environment
-    eval_env = HoverEnv()
+    eval_env = make_env()
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=model_dir,
@@ -74,24 +86,27 @@ def main():
     )
 
     # Save run config: reward function, observation space, and hyperparameters
-    env_tmp = HoverEnv()
+    env_tmp = make_env()
+    base_env = env_tmp.unwrapped
     config = {
         "timestamp": run_timestamp,
         "total_timesteps": total_timesteps,
         "n_envs": n_envs,
-        "reward_function": inspect.getsource(env_tmp._get_reward),
-        "observation_function": inspect.getsource(env_tmp._get_obs),
+        "wrapper": wrapper_name,
+        "wrapper_source": inspect.getsource(wrapper_cls) if wrapper_cls else None,
+        "reward_function": inspect.getsource(base_env._get_reward),
+        "observation_function": inspect.getsource(base_env._get_obs),
         "observation_bounds": {
-            "low": env_tmp._obs_bounds.low.tolist(),
-            "high": env_tmp._obs_bounds.high.tolist(),
+            "low": base_env._obs_bounds.low.tolist(),
+            "high": base_env._obs_bounds.high.tolist(),
         },
         "state_bounds": {
-            "low": env_tmp._state_bounds.low.tolist(),
-            "high": env_tmp._state_bounds.high.tolist(),
+            "low": base_env._state_bounds.low.tolist(),
+            "high": base_env._state_bounds.high.tolist(),
         },
         "target_pos_bounds": {
-            "low": env_tmp._target_pos_bounds.low.tolist(),
-            "high": env_tmp._target_pos_bounds.high.tolist(),
+            "low": base_env._target_pos_bounds.low.tolist(),
+            "high": base_env._target_pos_bounds.high.tolist(),
         },
         "ppo": {
             "learning_rate": model.learning_rate,

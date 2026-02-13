@@ -79,6 +79,7 @@ class HoverEnv(gym.Env):
         self.dt = self.model.opt.timestep  # 0.01s
         self.frame_skip = 1  # Control at 100Hz
         self._step_count = 0
+        self._prev_action = np.zeros(4, dtype=np.float32)
 
         # ── Mixer matrix ──
         A = np.array([
@@ -144,6 +145,8 @@ class HoverEnv(gym.Env):
         Args:
             action: [thrust_norm, tau_x_norm, tau_y_norm, tau_z_norm] in [-1, 1]
         """
+        self._prev_action = np.array(action, dtype=np.float32)
+
         # Denormalize: [-1, 1] → physical units [thrust in N, torques in N⋅m]
         physical_action = denormalize(action, self._action_bounds)
         thrust, tau_x, tau_y, tau_z = physical_action
@@ -183,6 +186,7 @@ class HoverEnv(gym.Env):
         """
         super().reset(seed=seed)
         self._step_count = 0
+        self._prev_action = np.zeros(4, dtype=np.float32)
 
         # Reset MuJoCo state
         mujoco.mj_resetData(self.model, self.data)
