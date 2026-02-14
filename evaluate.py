@@ -355,63 +355,8 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
         print(f"Description saved to {desc_path}")
 
 
-def interactive_control(render: bool = True):
-    """Run environment with hover thrust (no learned policy).
-
-    Useful for testing that the simulation works correctly.
-    """
-    env = HoverEnv()
-    obs, info = env.reset()
-
-    # Calculate hover thrust
-    # Total mass = 0.2 (core) + 4*0.025 (arms) + 4*0.025 (thrusters) = 0.4 kg
-    # Hover thrust per motor = (mass * g) / (4 * gear_ratio) = (0.4 * 9.81) / (4 * 2) = 0.49
-    # In [-1, 1] space: 0.49 -> 2*0.49 - 1 = -0.02
-    hover_thrust_normalized = 2 * 0.49 - 1  # Convert [0,1] to [-1,1]
-
-    viewer = None
-    if render:
-        viewer = mujoco.viewer.launch_passive(env.model, env.data)
-
-    print("Running with constant hover thrust...")
-    print(f"Hover thrust (normalized): {hover_thrust_normalized:.3f}")
-    print("Press Ctrl+C to stop")
-
-    try:
-        step = 0
-        while True:
-            # Constant hover action: [thrust, roll_rate, pitch_rate, yaw_rate]
-            # All in [-1, 1] space
-            action = np.array([hover_thrust_normalized, 0.0, 0.0, 0.0], dtype=np.float32)
-
-            obs, reward, terminated, truncated, info = env.step(action)
-
-            if render and viewer is not None:
-                if not viewer.is_running():
-                    break
-                viewer.sync()
-                time.sleep(base_env.dt * base_env.frame_skip)
-
-            step += 1
-            if step % 100 == 0:
-                state = info["state"]
-                print(f"Step {step}: z={state[2]:.3f}, reward={reward:.2f}")
-
-            if terminated or truncated:
-                print(f"Episode ended after {step} steps")
-                obs, info = env.reset()
-                step = 0
-
-    except KeyboardInterrupt:
-        print("\nStopped by user")
-
-    if viewer is not None:
-        viewer.close()
-    env.close()
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate or test hover policy")
+    parser = argparse.ArgumentParser(description="Evaluate trained hover policy")
     parser.add_argument(
         "--model",
         type=str,
@@ -434,19 +379,10 @@ def main():
         action="store_true",
         help="Generate performance plots (saved to model directory)"
     )
-    parser.add_argument(
-        "--test-hover",
-        action="store_true",
-        help="Test with constant hover thrust (no learned policy)"
-    )
-
     args = parser.parse_args()
 
-    if args.test_hover:
-        interactive_control(render=not args.no_render)
-    else:
-        evaluate(args.model, args.episodes, render=not args.no_render,
-                 plot=args.plot)
+    evaluate(args.model, args.episodes, render=not args.no_render,
+             plot=args.plot)
 
 
 if __name__ == "__main__":
