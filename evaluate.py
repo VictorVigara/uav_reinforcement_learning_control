@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 
 from envs import HoverEnv, get_wrapper
+from utils.trajectories import TRAJECTORY_GENERATORS
 
 
 def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots",
@@ -212,6 +213,86 @@ def _update_visuals(viewer, drone_pos, target_pos, trail, pos_err):
         scn.ngeom += 1
 
 
+def _update_trajectory_visuals(viewer, drone_pos, waypoints, current_wp_idx,
+                                trail, pos_err):
+    """Update MuJoCo viewer with trajectory and waypoint visualization."""
+    scn = viewer.user_scn
+    scn.ngeom = 0
+    num_wp = len(waypoints)
+
+    # 1. Path lines connecting consecutive waypoints
+    for i in range(num_wp):
+        if scn.ngeom >= scn.maxgeom:
+            break
+        p1 = waypoints[i]
+        p2 = waypoints[(i + 1) % num_wp]
+        mujoco.mjv_connector(
+            scn.geoms[scn.ngeom],
+            mujoco.mjtGeom.mjGEOM_LINE,
+            0.002,
+            np.asarray(p1, dtype=np.float64),
+            np.asarray(p2, dtype=np.float64),
+        )
+        scn.geoms[scn.ngeom].rgba[:] = [0.7, 0.7, 0.7, 0.4]
+        scn.ngeom += 1
+
+    # 2. Waypoint spheres (current = larger yellow, others = small gray)
+    for i in range(num_wp):
+        if scn.ngeom >= scn.maxgeom:
+            break
+        is_current = (i == current_wp_idx)
+        size = 0.06 if is_current else 0.03
+        rgba = [1.0, 0.9, 0.0, 0.9] if is_current else [0.6, 0.6, 0.6, 0.4]
+        mujoco.mjv_initGeom(
+            scn.geoms[scn.ngeom],
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([size, 0, 0]),
+            pos=np.asarray(waypoints[i], dtype=np.float64),
+            mat=np.eye(3).flatten(),
+            rgba=np.array(rgba),
+        )
+        scn.ngeom += 1
+
+    # 3. Error line (drone -> current waypoint, color-coded)
+    if scn.ngeom < scn.maxgeom:
+        mujoco.mjv_connector(
+            scn.geoms[scn.ngeom],
+            mujoco.mjtGeom.mjGEOM_LINE,
+            0.003,
+            np.asarray(drone_pos, dtype=np.float64),
+            np.asarray(waypoints[current_wp_idx], dtype=np.float64),
+        )
+        err_ratio = min(pos_err / 1.0, 1.0)
+        scn.geoms[scn.ngeom].rgba[:] = [err_ratio, 1.0 - err_ratio, 0.0, 0.8]
+        scn.ngeom += 1
+
+    # 4. Flight trail (blue dots)
+    for pt in trail:
+        if scn.ngeom >= scn.maxgeom:
+            break
+        mujoco.mjv_initGeom(
+            scn.geoms[scn.ngeom],
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([0.008, 0, 0]),
+            pos=np.asarray(pt, dtype=np.float64),
+            mat=np.eye(3).flatten(),
+            rgba=np.array([0.2, 0.5, 1.0, 0.4]),
+        )
+        scn.ngeom += 1
+
+    # 5. Ground shadow
+    if scn.ngeom < scn.maxgeom:
+        mujoco.mjv_initGeom(
+            scn.geoms[scn.ngeom],
+            type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+            size=np.array([0.04, 0.04, 0.001]),
+            pos=np.array([drone_pos[0], drone_pos[1], 0.001]),
+            mat=np.eye(3).flatten(),
+            rgba=np.array([0.3, 0.3, 0.3, 0.4]),
+        )
+        scn.ngeom += 1
+
+
 def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
              plot: bool = False):
     """Evaluate a trained policy.
@@ -355,6 +436,181 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
         print(f"Description saved to {desc_path}")
 
 
+def evaluate_trajectory(model_path: str, trajectory: str = "eight",
+                        spacing: float = 0.5, reach_radius: float = 0.25,
+                        max_steps: int = 5000, render: bool = True):
+    """Evaluate a trained policy on a single-lap waypoint trajectory.
+
+    The drone starts at the first waypoint with zero velocities and follows a
+    sequence of waypoints, advancing to the next when within reach_radius.
+    Stops after completing one full lap. Plots are always generated.
+
+    Args:
+        model_path: Path to the trained model (.zip file).
+        trajectory: Trajectory type key ("eight", "circle", "square").
+        spacing: Distance between consecutive waypoints (meters).
+        reach_radius: Distance threshold to switch to next waypoint (meters).
+        max_steps: Maximum simulation steps (0 = run until viewer closed).
+        render: Whether to render visualization.
+    """
+    # Load model
+    print(f"Loading model from {model_path}...")
+    model = PPO.load(model_path, device="cpu")
+    model_dir = os.path.dirname(os.path.abspath(model_path))
+
+    # Auto-detect wrapper from config.json
+    wrapper_cls = None
+    config_path = os.path.join(model_dir, "config.json")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            config = json.load(f)
+        wrapper_cls = get_wrapper(config.get("wrapper", "none"))
+        print(f"Wrapper: {config.get('wrapper', 'none')}")
+
+    # Create environment with extended episode length
+    effective_max = max_steps if max_steps > 0 else 100_000
+    env = HoverEnv(max_episode_steps=effective_max)
+    if wrapper_cls:
+        env = wrapper_cls(env)
+    base_env = env.unwrapped
+
+    max_rate = np.rad2deg(env.max_rate_rad) if hasattr(env, "max_rate_rad") else 360.0
+
+    # Generate waypoints
+    gen_fn = TRAJECTORY_GENERATORS[trajectory]
+    waypoints = gen_fn(spacing=spacing)
+    num_waypoints = len(waypoints)
+    print(f"Trajectory: {trajectory}, {num_waypoints} waypoints, spacing={spacing}m")
+
+    # Reset environment
+    obs, info = env.reset()
+
+    # Override initial state: start at first waypoint, identity quaternion, zero velocities
+    start_pos = waypoints[0]
+    qpos_init = np.array([start_pos[0], start_pos[1], start_pos[2], 1.0, 0.0, 0.0, 0.0])
+    qvel_init = np.zeros(6)
+    base_env.set_state(qpos_init, qvel_init)
+
+    # Set second waypoint as target (drone is already at the first)
+    wp_idx = 1 % num_waypoints
+    base_env.target_state.state[0:3] = waypoints[wp_idx].astype(np.float32)
+
+    # Re-obtain observation after state override
+    obs = base_env._get_obs()
+    if hasattr(env, 'observation') and callable(env.observation):
+        obs = env.observation(obs)
+
+    # Reset wrapper integral state if using rate control wrapper
+    if hasattr(env, '_rate_int_torque'):
+        env._rate_int_torque = np.zeros(3)
+
+    # Setup viewer
+    viewer = None
+    if render:
+        viewer = mujoco.viewer.launch_passive(base_env.model, base_env.data)
+        viewer.cam.lookat[:] = [0.0, 0.0, 1.0]
+        viewer.cam.distance = 5.0
+        viewer.cam.azimuth = 180
+        viewer.cam.elevation = -35
+
+    # Tracking variables
+    trail = deque(maxlen=500)
+    step_count = 0
+    total_reward = 0.0
+    waypoints_reached = 0
+    laps_completed = 0
+    done = False
+
+    ep_data = {
+        "times": [], "positions": [], "targets": [],
+        "attitudes": [], "velocities": [], "angular_velocities": [],
+        "motor_commands": [], "actions": [], "rewards": [],
+    }
+
+    print(f"\n--- Trajectory: {trajectory} ---")
+    print(f"  Start (WP #0): [{start_pos[0]:.2f}, {start_pos[1]:.2f}, {start_pos[2]:.2f}]")
+    print(f"  Target (WP #{wp_idx}): [{waypoints[wp_idx][0]:.2f}, {waypoints[wp_idx][1]:.2f}, {waypoints[wp_idx][2]:.2f}]")
+
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, terminated, truncated, info = env.step(action)
+
+        total_reward += reward
+        step_count += 1
+
+        drone_pos = info["state"][:3]
+        current_target = waypoints[wp_idx]
+        dist_to_wp = float(np.linalg.norm(drone_pos - current_target))
+
+        # Waypoint switching
+        if dist_to_wp < reach_radius:
+            waypoints_reached += 1
+            wp_idx = (wp_idx + 1) % num_waypoints
+            if wp_idx == 0:
+                laps_completed += 1
+                print(f"  Lap completed at step {step_count}!")
+                done = True
+            if not done:
+                base_env.target_state.state[0:3] = waypoints[wp_idx].astype(np.float32)
+                print(f"  WP {waypoints_reached}: reached! Next #{wp_idx} "
+                      f"[{waypoints[wp_idx][0]:.2f}, {waypoints[wp_idx][1]:.2f}, {waypoints[wp_idx][2]:.2f}]")
+
+        # Data collection (always, for plotting)
+        state = info["state"]
+        ep_data["times"].append(step_count * base_env.dt * base_env.frame_skip)
+        ep_data["positions"].append(state[:3].copy())
+        ep_data["targets"].append(info["target"].copy())
+        ep_data["attitudes"].append(state[3:6].copy())
+        ep_data["velocities"].append(state[6:9].copy())
+        ep_data["angular_velocities"].append(state[9:12].copy())
+        ep_data["motor_commands"].append(info["motor_commands"].copy())
+        ep_data["actions"].append(action.copy())
+        ep_data["rewards"].append(reward)
+
+        # Trail
+        if step_count % 3 == 0:
+            trail.append(drone_pos.copy())
+
+        # Render
+        if render and viewer is not None and viewer.is_running():
+            _update_trajectory_visuals(viewer, drone_pos, waypoints, wp_idx,
+                                       trail, dist_to_wp)
+            viewer.sync()
+            time.sleep(base_env.dt * base_env.frame_skip)
+        elif render and viewer is not None and not viewer.is_running():
+            break
+
+        # Termination
+        if terminated:
+            print(f"  TERMINATED at step {step_count} (out of bounds)")
+            done = True
+        elif truncated:
+            print(f"  Max steps ({effective_max}) reached")
+            done = True
+
+        # Status
+        if step_count % 200 == 0:
+            print(f"  Step {step_count}: wp={wp_idx}/{num_waypoints}, "
+                  f"dist={dist_to_wp:.2f}m, laps={laps_completed}")
+
+    if viewer is not None:
+        viewer.close()
+    env.close()
+
+    # Summary
+    print(f"\n=== Trajectory Evaluation Summary ===")
+    print(f"Trajectory:        {trajectory}")
+    print(f"Steps:             {step_count}")
+    print(f"Waypoints reached: {waypoints_reached}")
+    print(f"Laps completed:    {laps_completed}")
+    print(f"Total reward:      {total_reward:.2f}")
+
+    if len(ep_data["times"]) > 0:
+        plot_episode(ep_data, episode_num=0,
+                     save_dir=os.path.join(model_dir, "plots_trajectory"),
+                     max_rate=max_rate)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate trained hover policy")
     parser.add_argument(
@@ -379,10 +635,45 @@ def main():
         action="store_true",
         help="Generate performance plots (saved to model directory)"
     )
+    parser.add_argument(
+        "--trajectory",
+        type=str,
+        default=None,
+        choices=list(TRAJECTORY_GENERATORS.keys()),
+        help="Trajectory type for waypoint tracking (enables trajectory mode)"
+    )
+    parser.add_argument(
+        "--spacing",
+        type=float,
+        default=0.5,
+        help="Distance between waypoints in meters (default: 0.5)"
+    )
+    parser.add_argument(
+        "--reach-radius",
+        type=float,
+        default=0.25,
+        help="Distance threshold to switch waypoints in meters (default: 0.25)"
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=5000,
+        help="Max simulation steps for trajectory mode (default: 5000, 0=unlimited)"
+    )
     args = parser.parse_args()
 
-    evaluate(args.model, args.episodes, render=not args.no_render,
-             plot=args.plot)
+    if args.trajectory:
+        evaluate_trajectory(
+            model_path=args.model,
+            trajectory=args.trajectory,
+            spacing=args.spacing,
+            reach_radius=args.reach_radius,
+            max_steps=args.max_steps,
+            render=not args.no_render,
+        )
+    else:
+        evaluate(args.model, args.episodes, render=not args.no_render,
+                 plot=args.plot)
 
 
 if __name__ == "__main__":

@@ -125,6 +125,38 @@ python evaluate.py --model ./models_trained/<run>/best_model.zip --no-render --e
 
 Plots show position tracking, position error, attitude, linear/angular velocity, motor commands, and policy actions over time. After evaluation, you are prompted to save a brief description of the policy behavior to `description.txt` in the model directory.
 
+### Trajectory Evaluation
+
+Evaluate the trained policy on a single-lap waypoint trajectory. The drone starts at the first waypoint with zero velocities, advances to the next waypoint when within 0.25 m (configurable), and stops after completing one full lap. Performance plots are always generated.
+
+```bash
+# Figure-8 trajectory
+python evaluate.py --model ./models_trained/<run>/best_model.zip --trajectory eight
+
+# Circle with tighter waypoint spacing
+python evaluate.py --trajectory circle --spacing 0.3
+
+# Square with custom reach threshold
+python evaluate.py --trajectory square --spacing 0.4 --reach-radius 0.15
+```
+
+| Flag | Description |
+|---|---|
+| `--trajectory {eight,circle,square}` | Trajectory shape (enables trajectory mode) |
+| `--spacing FLOAT` | Distance between waypoints in meters (default: 0.5) |
+| `--reach-radius FLOAT` | Distance threshold to switch to next waypoint (default: 0.25) |
+| `--max-steps N` | Max simulation steps as safety limit (default: 5000) |
+
+Available trajectories:
+
+| Trajectory | Description | Default parameters |
+|---|---|---|
+| `eight` | Figure-8 (lemniscate) in XY plane | radius=1.0 m, center=(0,0,1) |
+| `circle` | Circle in XY plane | radius=1.0 m, center=(0,0,1) |
+| `square` | Square in XY plane | side=1.5 m, center=(0,0,1) |
+
+The viewer shows waypoints as spheres (yellow = current target, gray = upcoming), gray lines connecting the path, and a blue flight trail. The console reports each waypoint reached, and plots are saved automatically to `plots_trajectory/` in the model directory.
+
 ## PID Controller
 
 `pid_controller.py` implements a **cascaded PID** baseline controller with four loops:
