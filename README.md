@@ -26,6 +26,8 @@ Quadrotor hovering control using **Proximal Policy Optimization (PPO)** with **M
 │       ├── drone.xml         # MuJoCo drone model definition
 │       ├── scene.xml         # Scene configuration
 │       └── assets/           # STL mesh files
+├── ros2_ws/                  # ROS2 workspace for real-world deployment
+│   └── src/rl_drone_control/ # Policy node, velocity estimator (see its README)
 ├── models_trained/           # Saved model checkpoints (per training run)
 ├── logs/                     # TensorBoard training logs
 └── plots/                    # Generated evaluation plots
@@ -156,6 +158,30 @@ Available trajectories:
 | `square` | Square in XY plane | side=1.5 m, center=(0,0,1) |
 
 The viewer shows waypoints as spheres (yellow = current target, gray = upcoming), gray lines connecting the path, and a blue flight trail. The console reports each waypoint reached, and plots are saved automatically to `plots_trajectory/` in the model directory.
+
+### Velocity Estimator Test
+
+Test the velocity estimator used for sim-to-real deployment by comparing ground truth velocity (from MuJoCo `qvel`) against filtered differentiation of position for different low-pass filter alpha values.
+
+```bash
+# Default alphas [0.0, 0.3, 0.6, 0.8, 0.95]
+python evaluate.py --model ./models_trained/<run>/best_model.zip --test-velocity
+
+# Custom alphas
+python evaluate.py --test-velocity 0.0 0.5 0.8 0.95
+
+# Headless, longer episode
+python evaluate.py --test-velocity 0.0 0.5 0.8 0.95 --no-render --max-steps 3000
+```
+
+| Flag | Description |
+|---|---|
+| `--test-velocity [ALPHA ...]` | Enable velocity estimator test mode with optional alpha values |
+| `--max-steps N` | Maximum simulation steps (default: 5000) |
+
+Generates two plots saved to `plots_velocity_estimator/` in the model directory:
+- **`velocity_per_axis.png`** — GT vs estimated velocity for each alpha, per axis (vx, vy, vz)
+- **`velocity_error.png`** — Euclidean error over time + RMSE bar chart per alpha
 
 ## PID Controller
 
@@ -357,3 +383,9 @@ python debug_training.py
 ```
 
 Runs diagnostic episodes to identify which state dimensions cause early termination, useful for tuning environment bounds and reward shaping.
+
+## ROS2 Deployment
+
+The `ros2_ws/` directory contains a ROS2 package (`rl_drone_control`) for deploying the trained policy on a real quadrotor with Betaflight. It subscribes to mocap, attitude, and IMU topics, estimates linear velocity via filtered position differentiation, builds the normalized observation, runs the PPO policy, and publishes CTBR commands.
+
+See [ros2_ws/src/rl_drone_control/README.md](ros2_ws/src/rl_drone_control/README.md) for full details on topics, parameters, build instructions, and safety behavior.
