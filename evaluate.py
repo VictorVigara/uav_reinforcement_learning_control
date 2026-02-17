@@ -13,6 +13,7 @@ from stable_baselines3 import PPO
 
 from envs import HoverEnv, get_wrapper
 from utils.trajectories import TRAJECTORY_GENERATORS
+from ros2_ws.src.rl_drone_control.rl_drone_control.state_estimator import VelocityEstimator
 
 
 def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots",
@@ -611,6 +612,164 @@ def evaluate_trajectory(model_path: str, trajectory: str = "eight",
                      max_rate=max_rate)
 
 
+def evaluate_velocity_estimator(model_path: str, alphas: list[float],
+                                 max_steps: int = 2000,
+                                 render: bool = True):
+    """Run a sim episode and compare GT velocity with estimated velocity for
+    different low-pass filter alpha values.
+
+    Args:
+        model_path: Path to the trained model (.zip file).
+        alphas: List of alpha values to test (e.g. [0.0, 0.5, 0.8, 0.95]).
+        max_steps: Maximum simulation steps.
+        render: Whether to render the MuJoCo viewer.
+    """
+    print(f"Loading model from {model_path}...")
+    model = PPO.load(model_path, device="cpu")
+    model_dir = os.path.dirname(os.path.abspath(model_path))
+
+    # Auto-detect wrapper
+    wrapper_cls = None
+    config_path = os.path.join(model_dir, "config.json")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            config = json.load(f)
+        wrapper_cls = get_wrapper(config.get("wrapper", "none"))
+        print(f"Wrapper: {config.get('wrapper', 'none')}")
+
+    env = HoverEnv(max_episode_steps=max_steps)
+    if wrapper_cls:
+        env = wrapper_cls(env)
+    base_env = env.unwrapped
+
+    sim_dt = base_env.dt * base_env.frame_skip
+
+    # Create one VelocityEstimator per alpha
+    estimators = {a: VelocityEstimator(alpha=a) for a in alphas}
+
+    # Data storage
+    times = []
+    gt_velocities = []
+    est_velocities = {a: [] for a in alphas}
+
+    obs, info = env.reset()
+
+    viewer = None
+    if render:
+        viewer = mujoco.viewer.launch_passive(base_env.model, base_env.data)
+        viewer.cam.lookat[:] = [0.0, 0.0, 0.8]
+        viewer.cam.distance = 7.0
+        viewer.cam.azimuth = 135
+        viewer.cam.elevation = -25
+
+    print(f"\n--- Velocity Estimator Test (alphas={alphas}) ---")
+    step_count = 0
+    done = False
+
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+        step_count += 1
+
+        state = info["state"]
+        gt_pos = state[:3].copy()
+        gt_vel = state[6:9].copy()
+        t = step_count * sim_dt
+
+        times.append(t)
+        gt_velocities.append(gt_vel)
+
+        for a, est in estimators.items():
+            est_vel = est.update(gt_pos, t)
+            est_velocities[a].append(est_vel.copy())
+
+        if render and viewer is not None and viewer.is_running():
+            viewer.sync()
+            time.sleep(sim_dt)
+        elif render and viewer is not None and not viewer.is_running():
+            break
+
+        if step_count % 500 == 0:
+            print(f"  Step {step_count}/{max_steps}")
+
+    if viewer is not None:
+        viewer.close()
+    env.close()
+
+    # --- Plot results ---
+    times = np.array(times)
+    gt_vel = np.array(gt_velocities)
+
+    save_dir = os.path.join(model_dir, "plots_velocity_estimator")
+    os.makedirs(save_dir, exist_ok=True)
+
+    axis_labels = ["vx", "vy", "vz"]
+    colors = plt.cm.viridis(np.linspace(0.15, 0.85, len(alphas)))
+
+    # Per-axis plot: GT vs all alphas
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    fig.suptitle("Velocity Estimator: GT vs Filtered Estimate", fontsize=14)
+
+    for ax_i in range(3):
+        ax = axes[ax_i]
+        ax.plot(times, gt_vel[:, ax_i], "k-", linewidth=1.5, label="GT", alpha=0.9)
+        for j, a in enumerate(alphas):
+            ev = np.array(est_velocities[a])
+            ax.plot(times, ev[:, ax_i], color=colors[j], linewidth=1.0,
+                    label=f"alpha={a}", alpha=0.8)
+        ax.set_ylabel(f"{axis_labels[ax_i]} (m/s)")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.tight_layout()
+    filepath = os.path.join(save_dir, "velocity_per_axis.png")
+    fig.savefig(filepath, dpi=150)
+    plt.close(fig)
+    print(f"  Per-axis plot saved to {filepath}")
+
+    # Error magnitude plot
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+    fig.suptitle("Velocity Estimation Error", fontsize=14)
+
+    ax = axes[0]
+    for j, a in enumerate(alphas):
+        ev = np.array(est_velocities[a])
+        err = np.linalg.norm(ev - gt_vel, axis=1)
+        ax.plot(times, err, color=colors[j], linewidth=1.0, label=f"alpha={a}")
+    ax.set_ylabel("Error magnitude (m/s)")
+    ax.set_title("Euclidean error ||est - GT||")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # RMSE bar chart
+    ax = axes[1]
+    rmse_vals = []
+    for a in alphas:
+        ev = np.array(est_velocities[a])
+        rmse = np.sqrt(np.mean(np.sum((ev - gt_vel) ** 2, axis=1)))
+        rmse_vals.append(rmse)
+    bars = ax.bar([f"a={a}" for a in alphas], rmse_vals, color=colors)
+    ax.set_ylabel("RMSE (m/s)")
+    ax.set_title("RMSE by alpha")
+    for bar, val in zip(bars, rmse_vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.001,
+                f"{val:.4f}", ha="center", va="bottom", fontsize=8)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    fig.tight_layout()
+    filepath = os.path.join(save_dir, "velocity_error.png")
+    fig.savefig(filepath, dpi=150)
+    plt.close(fig)
+    print(f"  Error plot saved to {filepath}")
+
+    # Print RMSE summary
+    print("\n=== Velocity Estimator RMSE Summary ===")
+    for a, rmse in zip(alphas, rmse_vals):
+        print(f"  alpha={a:<6.3f}  RMSE={rmse:.5f} m/s")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate trained hover policy")
     parser.add_argument(
@@ -660,9 +819,27 @@ def main():
         default=5000,
         help="Max simulation steps for trajectory mode (default: 5000, 0=unlimited)"
     )
+    parser.add_argument(
+        "--test-velocity",
+        nargs="*",
+        type=float,
+        default=None,
+        metavar="ALPHA",
+        help="Test velocity estimator with given alpha values "
+             "(e.g. --test-velocity 0.0 0.5 0.8 0.95). "
+             "If no values given, defaults to [0.0, 0.3, 0.6, 0.8, 0.95]."
+    )
     args = parser.parse_args()
 
-    if args.trajectory:
+    if args.test_velocity is not None:
+        alphas = args.test_velocity if args.test_velocity else [0.0, 0.1, 0.2]
+        evaluate_velocity_estimator(
+            model_path=args.model,
+            alphas=alphas,
+            max_steps=args.max_steps,
+            render=not args.no_render,
+        )
+    elif args.trajectory:
         evaluate_trajectory(
             model_path=args.model,
             trajectory=args.trajectory,
