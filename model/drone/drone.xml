@@ -6,7 +6,7 @@
   <default>
     <default class="x2">
       <geom mass="0"/>
-      <motor ctrlrange="0 13"/>
+      <motor ctrlrange="0 1.47"/>
       <mesh scale="0.01 0.01 0.01"/>
       <default class="visual">
         <geom group="2" type="mesh" contype="0" conaffinity="0"/>
@@ -47,7 +47,9 @@
         axis="0 1 0"
         range="-3.14 3.14"
         damping="0.1"/> -->
-      <geom type="mesh" rgba="1 1 1 1" mesh="base_link"/>
+      <inertial pos="-0.00165 0 0.00622" mass="0.1223"
+                diaginertia="5.856e-05 6.035e-05 1.076e-04"/>
+      <geom type="mesh" rgba="1 1 1 1" mesh="base_link" mass="0"/>
       <site name="imu" pos="0 0 .02"/>
     <body name="prop1" pos="0.039799 -0.039799 0.0336">
       <inertial pos="0 0 -0.001" quat="0.5 0.5 -0.5 0.5" mass="0.00693608" diaginertia="3.75335e-06 1.87898e-06 1.87898e-06"/>
@@ -90,7 +92,7 @@
   </sensor>
 
   <keyframe>
-    <key name="hover" qpos=".3 1 0.2 0 0" ctrl="3.2495625 3.2495625 3.2495625 3.2495625"/>
+    <key name="hover" qpos=".3 1 0.2 0 0" ctrl="0.36788 0.36788 0.36788 0.36788"/>
     <!-- <key name="hover" qpos="0 0 .3 1 0 0 0" ctrl="3.2495625 3.2495625 3.2495625 3.2495625"/> -->
   </keyframe>
 </mujoco>

@@ -210,8 +210,14 @@ def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots"):
     rate_err = des_rates - actual_rates
     des_att = np.rad2deg(np.array(data["des_attitudes"]))
 
-    fig, axes = plt.subplots(5, 2, figsize=(14, 16))
+    from matplotlib.gridspec import GridSpec
+    fig = plt.figure(figsize=(14, 22))
     fig.suptitle(f"PID Controller — Episode {episode_num}", fontsize=14)
+    gs = GridSpec(6, 2, figure=fig, hspace=0.45, wspace=0.3)
+    axes = np.empty((5, 2), dtype=object)
+    for _i in range(5):
+        for _j in range(2):
+            axes[_i, _j] = fig.add_subplot(gs[_i, _j])
 
     # Position tracking
     ax = axes[0, 0]
@@ -306,9 +312,44 @@ def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots"):
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    fig.tight_layout()
+    # ── Betaflight RC channels (row 6, full width) ──
+    # Thrust:  action[0] ∈ [-1,1]  →  PWM = 1000 + (a+1)/2 * 1000  → [1000, 2000]
+    # RPY:     action[1:4] ∈ [-1,1] →  PWM = 1500 + a * 500          → [1000, 2000], center 1500
+    pwm_thr   = 1000 + (actions[:, 0] + 1) / 2 * 1000
+    pwm_roll  = 1500 + actions[:, 1] * 500
+    pwm_pitch = 1500 + actions[:, 2] * 500
+    pwm_yaw   = 1500 + actions[:, 3] * 500
+
+    ax_rpy = fig.add_subplot(gs[5, :])
+    ax_thr = ax_rpy.twinx()
+
+    lns = []
+    lns += ax_rpy.plot(t, pwm_roll,  color="r", label="roll",  linewidth=1.0)
+    lns += ax_rpy.plot(t, pwm_pitch, color="g", label="pitch", linewidth=1.0)
+    lns += ax_rpy.plot(t, pwm_yaw,   color="b", label="yaw",   linewidth=1.0)
+    ax_rpy.axhline(1500, color="k", linewidth=0.5, linestyle="--", alpha=0.4)
+
+    lns += ax_thr.plot(t, pwm_thr, color="k", label="thrust", linewidth=1.5)
+
+    # Zoom left axis to actual RPY range + margin
+    rpy_all = np.concatenate([pwm_roll, pwm_pitch, pwm_yaw])
+    rpy_margin = max((rpy_all.max() - rpy_all.min()) * 0.2, 20)
+    ax_rpy.set_ylim(rpy_all.min() - rpy_margin, rpy_all.max() + rpy_margin)
+    ax_thr.set_ylim(950, 2050)
+
+    ax_rpy.set_xlabel("Time (s)")
+    ax_rpy.set_ylabel("RPY RC channel (µs)", color="dimgray")
+    ax_thr.set_ylabel("Thrust RC channel (µs)", color="k")
+    ax_rpy.set_title("Betaflight RC Channels  —  RPY left axis (zoomed)  |  Thrust right axis")
+    ax_rpy.tick_params(axis="y", labelcolor="dimgray")
+    ax_thr.tick_params(axis="y", labelcolor="k")
+
+    labels = [l.get_label() for l in lns]
+    ax_rpy.legend(lns, labels, loc="upper right", fontsize=8, ncol=4)
+    ax_rpy.grid(True, alpha=0.3)
+
     filepath = os.path.join(save_dir, f"pid_episode_{episode_num}.png")
-    fig.savefig(filepath, dpi=150)
+    fig.savefig(filepath, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Plot saved to {filepath}")
 

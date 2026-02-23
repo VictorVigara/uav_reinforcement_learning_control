@@ -6,17 +6,17 @@ update ctrlrange and keyframe hover ctrl when changing MAX_MOTOR_THRUST.
 """
 
 # ── Base parameters (change these to update everywhere) ──
-MAX_MOTOR_THRUST = 13.0         # N per motor
+MAX_MOTOR_THRUST = 1.47         # N per motor  (150 g full battery)
 ARM_LENGTH = 0.039799           # m
 YAW_TORQUE_COEFF = 0.0201       # motor reaction-torque / thrust ratio
-MASS = 0.3446                   # kg (total drone mass from MuJoCo)
+MASS = 0.150                    # kg (real measured mass, including Raspberry Pi)
 G = 9.81                        # m/s²
 DT = 0.01                       # s (MuJoCo timestep)
-IXX = 6.44e-4                   # kg·m² (roll inertia)
-IYY = 6.54e-4                   # kg·m² (pitch inertia)
-IZZ = 8.31e-4                   # kg·m² (yaw inertia)
+IXX = 1.44e-4                   # kg·m² (roll inertia)
+IYY = 1.46e-4                   # kg·m² (pitch inertia)
+IZZ = 2.11e-4                   # kg·m² (yaw inertia)
 
 # ── Derived parameters ──
-MAX_TOTAL_THRUST = 4 * MAX_MOTOR_THRUST                # N  (52.0)
-MAX_TORQUE = 0.5                                        # N·m
-HOVER_THRUST_PER_MOTOR = MASS * G / 4                   # N  (~0.845)
+MAX_TOTAL_THRUST = 4 * MAX_MOTOR_THRUST                # N  (5.88)
+MAX_TORQUE = 2 * MAX_MOTOR_THRUST * ARM_LENGTH          # N·m (~0.117)
+HOVER_THRUST_PER_MOTOR = MASS * G / 4                   # N  (~0.368)
