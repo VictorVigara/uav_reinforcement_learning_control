@@ -3,6 +3,7 @@ from gymnasium.spaces import Box
 import numpy as np
 import mujoco
 import os
+from scipy.spatial.transform import Rotation
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -109,13 +110,25 @@ class HoverEnv(gym.Env):
     def _get_obs(self) -> np.ndarray:
         """Get current observation (normalized).
 
-        Observation: [rel_pos (3), attitude (3), velocity (3), angular_velocity (3)]
-        where rel_pos = target_position - uav_position.
+        Observation: [rel_pos_body (3), attitude (3), velocity_body (3), angular_velocity (3)]
+        rel_pos and linear velocity are expressed in the body frame (R^T @ world_vec)
+        so the policy is yaw-invariant: the same position error produces the same
+        observation regardless of heading.  Angular velocity is already body-frame
+        from MuJoCo.
         """
         self._state.set_from_mujoco(self.data.qpos[:7], self.data.qvel[:6])
         obs = self._state.vec()
-        # Replace absolute position with relative position (target - UAV)
-        obs[0:3] = self.target_state.position - self._state.position
+
+        # Rotation matrix: body → world.  R^T rotates world → body.
+        R = Rotation.from_euler("xyz", self._state.attitude).as_matrix()
+
+        # Position error in body frame
+        world_rel_pos = self.target_state.position - self._state.position
+        obs[0:3] = R.T @ world_rel_pos
+
+        # Linear velocity in body frame (MuJoCo qvel[0:3] is world-frame for free joint)
+        obs[6:9] = R.T @ self._state.velocity
+
         return normalize(obs, self._obs_bounds).astype(np.float32)
 
     def _get_reward(self) -> float:
