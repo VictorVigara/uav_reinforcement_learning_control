@@ -1,0 +1,63 @@
+{
+    "description": "Tuned gains for x500 (2.0 kg) drone. Rate loop: bandwidth 70 rad/s roll/pitch, 50 rad/s yaw.",
+    "drone_params": {
+        "mass_kg": 2.0,
+        "arm_length_m": 0.177,
+        "Ixx": 0.029125,
+        "Iyy": 0.029125,
+        "Izz": 0.055225,
+        "com_offset_x_m": 0.0,
+        "max_motor_thrust_N": 9.81,
+        "max_total_thrust_N": 39.24,
+        "max_torque_Nm": 3.47,
+        "yaw_torque_coeff": 0.016
+    },
+    "position_xy": {
+        "kp": 8.0,
+        "kd": 6.0,
+        "ki": 0.15,
+        "notes": "Bandwidth ~2.8 rad/s, slightly overdamped."
+    },
+    "position_z": {
+        "kp": 8.0,
+        "kd": 7.0,
+        "ki": 0.4,
+        "notes": "Anti-windup clamped to ±0.50."
+    },
+    "attitude": {
+        "kp": 560.0,
+        "kd": 70.0,
+        "notes": "Rate loop bandwidth = kd = 70 rad/s. Outer att ratio = kp/kd = 8 rad/s per rad error."
+    },
+    "yaw": {
+        "kp": 250.0,
+        "kd": 50.0,
+        "notes": "Rate loop bandwidth = 50 rad/s. Outer yaw ratio = kp/kd = 5 rad/s per rad error."
+    },
+    "rate": {
+        "ki_torque": 0.5,
+        "integral_max": 0.10,
+        "notes": "I term scaled for x500 torque range (~3.47 Nm max). Integral clamp 0.10 Nm."
+    },
+    "rate_wrapper": {
+        "kd": [70.0, 70.0, 50.0],
+        "ki_rate_torque": 0.5,
+        "integral_max": 0.10,
+        "max_rate_deg": 360.0
+    },
+    "limits": {
+        "axy_max": 3.0,
+        "az_min": -4.0,
+        "az_max": 12.0,
+        "tilt_max": 0.30,
+        "z_integral_max": 0.50,
+        "xy_integral_max": 0.20,
+        "torque_motor_fraction": 0.85,
+        "torque_abs_max": 1.5,
+        "yaw_torque_scale": 0.5,
+        "notes": "At hover: max_tau = min(4.905*2*0.177*0.85, 1.5) = 1.48 Nm"
+    },
+    "tuning_notes": {
+        "performance": "Tuning iteration 2 — increased rate bandwidth and position gains."
+    }
+}
