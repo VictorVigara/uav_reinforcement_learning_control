@@ -3,9 +3,9 @@
     "drone_params": {
         "mass_kg": 2.0,
         "arm_length_m": 0.177,
-        "Ixx": 0.029125,
-        "Iyy": 0.029125,
-        "Izz": 0.055225,
+        "Ixx": 0.02167,
+        "Iyy": 0.02167,
+        "Izz": 0.04,
         "com_offset_x_m": 0.0,
         "max_motor_thrust_N": 9.81,
         "max_total_thrust_N": 39.24,

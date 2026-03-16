@@ -1,0 +1,82 @@
+<mujoco model="x500">
+  <compiler autolimits="true"/>
+  <option timestep="0.01" density="1.225" viscosity="1.8e-5" integrator="RK4"/>
+
+  <worldbody>
+    <light pos="0 0 3" dir="0 0 -1"/>
+    <geom name="floor" type="plane" size="5 5 0.1" rgba="0.8 0.9 0.8 1"/>
+
+    <body name="base_link" pos="0 0 0.3">
+      <joint name="base" type="free"/>
+
+      <inertial pos="0 0 0"
+                mass="2.0"
+                diaginertia="0.02167 0.02167 0.04"/>
+
+      <!-- Body plate -->
+      <geom type="box" size="0.072 0.072 0.02" rgba="0.2 0.2 0.2 1" mass="0"/>
+
+      <site name="imu" pos="0 0 0.02"/>
+
+      <!-- Motor 1: front-right (+x,-y), CCW → +yaw torque -->
+      <body name="prop1" pos="0.177 -0.177 0.025">
+        <inertial pos="0 0 0" mass="0.005"
+                  diaginertia="3.75e-6 3.75e-6 7.5e-6"/>
+        <joint name="prop1" axis="0 0 1"/>
+        <geom type="cylinder" size="0.127 0.005" rgba="0.1 0.1 0.8 0.5" mass="0"/>
+      </body>
+
+      <!-- Motor 2: rear-right (-x,-y), CW → -yaw torque -->
+      <body name="prop2" pos="-0.177 -0.177 0.025">
+        <inertial pos="0 0 0" mass="0.005"
+                  diaginertia="3.75e-6 3.75e-6 7.5e-6"/>
+        <joint name="prop2" axis="0 0 1"/>
+        <geom type="cylinder" size="0.127 0.005" rgba="0.8 0.1 0.1 0.5" mass="0"/>
+      </body>
+
+      <!-- Motor 3: rear-left (-x,+y), CCW → +yaw torque -->
+      <body name="prop3" pos="-0.177 0.177 0.025">
+        <inertial pos="0 0 0" mass="0.005"
+                  diaginertia="3.75e-6 3.75e-6 7.5e-6"/>
+        <joint name="prop3" axis="0 0 1"/>
+        <geom type="cylinder" size="0.127 0.005" rgba="0.1 0.1 0.8 0.5" mass="0"/>
+      </body>
+
+      <!-- Motor 4: front-left (+x,+y), CW → -yaw torque -->
+      <body name="prop4" pos="0.177 0.177 0.025">
+        <inertial pos="0 0 0" mass="0.005"
+                  diaginertia="3.75e-6 3.75e-6 7.5e-6"/>
+        <joint name="prop4" axis="0 0 1"/>
+        <geom type="cylinder" size="0.127 0.005" rgba="0.8 0.1 0.1 0.5" mass="0"/>
+      </body>
+
+      <!-- Thrust sites -->
+      <site name="thrust1" pos="0.177 -0.177 0.025"/>
+      <site name="thrust2" pos="-0.177 -0.177 0.025"/>
+      <site name="thrust3" pos="-0.177 0.177 0.025"/>
+      <site name="thrust4" pos="0.177 0.177 0.025"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- gear: "Fx Fy Fz Tx Ty Tz", torque sign = spin direction -->
+    <motor name="thrust1" site="thrust1" gear="0 0 1 0 0  0.016" ctrlrange="0 9.81"/>
+    <motor name="thrust2" site="thrust2" gear="0 0 1 0 0 -0.016" ctrlrange="0 9.81"/>
+    <motor name="thrust3" site="thrust3" gear="0 0 1 0 0  0.016" ctrlrange="0 9.81"/>
+    <motor name="thrust4" site="thrust4" gear="0 0 1 0 0 -0.016" ctrlrange="0 9.81"/>
+  </actuator>
+
+  <sensor>
+    <gyro name="body_gyro" site="imu"/>
+    <accelerometer name="body_linacc" site="imu"/>
+    <framequat name="body_quat" objtype="site" objname="imu"/>
+    <framepos name="body_pos" objtype="body" objname="base_link"/>
+    <framelinvel name="body_vel" objtype="body" objname="base_link"/>
+  </sensor>
+
+  <keyframe>
+    <!-- hover: each motor = mg/4 = 2.0*9.81/4 = 4.905 N -->
+    <key name="hover" qpos="0 0 0.3 1 0 0 0" ctrl="4.905 4.905 4.905 4.905"/>
+  </keyframe>
+
+</mujoco>
