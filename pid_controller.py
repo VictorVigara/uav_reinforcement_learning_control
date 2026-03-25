@@ -26,6 +26,7 @@ import mujoco.viewer
 import matplotlib.pyplot as plt
 
 from envs import HoverEnv
+from utils.trajectories import TRAJECTORY_GENERATORS
 from utils.drone_config import (
     MASS, G, DT, MAX_TOTAL_THRUST, MAX_TORQUE,
     ARM_LENGTH as L, IXX, IYY, IZZ,
@@ -131,13 +132,6 @@ class CascadedPIDController:
         thrust = MASS * (G + az) / tilt
         thrust = np.clip(thrust, 0.0, MAX_TOTAL_THRUST)
 
-        # Motor-clipping-aware torque limit:
-        # Each motor produces thrust/4. Max torque = motor_force × 2L.
-        # Apply safety fraction to stay away from motor saturation.
-        thrust_per_motor = thrust / 4.0
-        max_tau = min(thrust_per_motor * 2.0 * L * self.torque_motor_frac,
-                      self.torque_abs_max)
-
         # Rotate desired XY acceleration into body frame (yaw rotation)
         cy, sy = np.cos(yaw), np.sin(yaw)
         ax_b = cy * ax + sy * ay
@@ -167,11 +161,8 @@ class CascadedPIDController:
         )
         tau = tau_p + self.rate_int_torque
 
-        # Clamp torques (yaw gets less authority)
-        tau[0] = np.clip(tau[0], -max_tau, max_tau)
-        tau[1] = np.clip(tau[1], -max_tau, max_tau)
-        tau[2] = np.clip(tau[2], -max_tau * self.yaw_torque_scale,
-                         max_tau * self.yaw_torque_scale)
+        # No artificial torque clamping — let the motor mixer in the env
+        # handle saturation naturally (same as Betaflight).
 
         # ── 4. Normalize to [-1, 1] ──
         thrust_norm = 2.0 * thrust / MAX_TOTAL_THRUST - 1.0
@@ -419,7 +410,7 @@ def _update_visuals(viewer, drone_pos, target_pos, trail, pos_err):
 
 
 def evaluate(num_episodes: int = 5, render: bool = True, plot: bool = False,
-             gains_file: str | None = None):
+             gains_file: str | None = None, trajectory: str | None = None):
     """Evaluate the PID controller on HoverEnv.
 
     Args:
@@ -427,6 +418,8 @@ def evaluate(num_episodes: int = 5, render: bool = True, plot: bool = False,
         render: Whether to render the MuJoCo viewer.
         plot: Whether to save performance plots.
         gains_file: Optional path to a JSON file with custom PID gains.
+        trajectory: Optional trajectory type ('circle', 'eight', 'square').
+                    If set, the target moves along waypoints instead of hovering.
     """
     # Load gains
     gains = DEFAULT_GAINS
@@ -436,7 +429,7 @@ def evaluate(num_episodes: int = 5, render: bool = True, plot: bool = False,
         print(f"Loaded gains from {gains_file}")
 
     controller = CascadedPIDController(gains)
-    env = HoverEnv()
+    env = HoverEnv(max_episode_steps=2500)
 
     episode_rewards = []
     episode_lengths = []
@@ -457,6 +450,9 @@ def evaluate(num_episodes: int = 5, render: bool = True, plot: bool = False,
             "motor_commands": [], "actions": [], "rewards": [],
             "des_rates": [], "actual_rates": [], "des_attitudes": [],
         }
+        # Always collect rate data for numerical analysis
+        all_des_rates = []
+        all_actual_rates = []
 
         viewer = None
         if render:
@@ -468,19 +464,66 @@ def evaluate(num_episodes: int = 5, render: bool = True, plot: bool = False,
 
         state = info["state"]
         target = info["target"]
+
+        # Set up trajectory waypoints if requested
+        waypoints = None
+        wp_time = 0.0           # elapsed time along trajectory
+        wp_speed = 0.5          # m/s — target moves along path at this speed
+        wp_cumlen = None        # cumulative arc length at each waypoint
+        wp_total_len = 0.0
+        if trajectory:
+            gen = TRAJECTORY_GENERATORS[trajectory]
+            traj_center = np.array([0.0, 0.0, 1.0])
+            if trajectory == "square":
+                waypoints = gen(spacing=0.3, side_length=2.0, center=traj_center)
+            else:
+                waypoints = gen(spacing=0.3, radius=1.0, center=traj_center)
+            # Precompute cumulative arc length for smooth interpolation
+            dists = [0.0]
+            for i in range(1, len(waypoints)):
+                dists.append(dists[-1] + np.linalg.norm(waypoints[i] - waypoints[i - 1]))
+            # Close the loop
+            dists.append(dists[-1] + np.linalg.norm(waypoints[0] - waypoints[-1]))
+            wp_cumlen = np.array(dists)
+            wp_total_len = wp_cumlen[-1]
+            target = waypoints[0].copy()
+            env.target_state.state[0:3] = target
+
         print(f"\n--- Episode {ep + 1}/{num_episodes} ---")
         print(f"  Start:  [{state[0]:.2f}, {state[1]:.2f}, {state[2]:.2f}]")
-        print(f"  Target: [{target[0]:.2f}, {target[1]:.2f}, {target[2]:.2f}]")
+        if waypoints:
+            print(f"  Trajectory: {trajectory} ({len(waypoints)} waypoints)")
+        else:
+            print(f"  Target: [{target[0]:.2f}, {target[1]:.2f}, {target[2]:.2f}]")
 
         while not done:
             state = info["state"]
-            target = info["target"]
+            # Use dynamic waypoint target or static hover target
+            if waypoints:
+                wp_time += DT
+                # Distance along path at current time (loops)
+                s = (wp_speed * wp_time) % wp_total_len
+                # Find segment: wp_cumlen[i] <= s < wp_cumlen[i+1]
+                seg = np.searchsorted(wp_cumlen, s, side='right') - 1
+                seg = min(seg, len(waypoints) - 1)
+                seg_next = (seg + 1) % len(waypoints)
+                seg_len = wp_cumlen[seg + 1] - wp_cumlen[seg]
+                if seg_len > 1e-6:
+                    frac = (s - wp_cumlen[seg]) / seg_len
+                else:
+                    frac = 0.0
+                target = waypoints[seg] + frac * (waypoints[seg_next] - waypoints[seg])
+                env.target_state.state[0:3] = target
+            else:
+                target = info["target"]
             action, diag = controller.compute(state, target)
 
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             total_reward += reward
             step_count += 1
+            all_des_rates.append(diag["des_rate"].copy())
+            all_actual_rates.append(diag["actual_rate"].copy())
 
             drone_pos = info["state"][:3]
             pos_err = float(np.linalg.norm(drone_pos - info["target"]))
@@ -528,6 +571,35 @@ def evaluate(num_episodes: int = 5, render: bool = True, plot: bool = False,
         print(f"  {status} after {step_count} steps")
         print(f"  Total reward: {total_reward:.2f}, mean error: {np.mean(errors):.3f}m")
 
+        # ── Numerical rate tracking analysis ──
+        des_r = np.rad2deg(np.array(all_des_rates))
+        act_r = np.rad2deg(np.array(all_actual_rates))
+        rate_err = des_r - act_r
+        axis_names = ["roll", "pitch", "yaw"]
+
+        # Steady-state: last 25% of episode
+        ss_start = int(len(rate_err) * 0.75)
+        ss_err = rate_err[ss_start:]
+
+        # t90: time for rate error magnitude to drop below 10% of initial
+        rate_err_norm = np.linalg.norm(rate_err, axis=1)
+        if rate_err_norm[0] > 1e-3:
+            threshold = rate_err_norm[0] * 0.1
+            t90_idx = np.argmax(rate_err_norm < threshold)
+            t90_ms = t90_idx * DT * 1000 if t90_idx > 0 else float("inf")
+        else:
+            t90_ms = 0.0
+
+        print(f"  Rate tracking:")
+        print(f"    t90 = {t90_ms:.0f} ms")
+        for i, name in enumerate(axis_names):
+            rms = np.sqrt(np.mean(rate_err[:, i] ** 2))
+            ss_mean = np.mean(np.abs(ss_err[:, i]))
+            ss_max = np.max(np.abs(ss_err[:, i]))
+            peak = np.max(np.abs(rate_err[:, i]))
+            print(f"    {name:5s}: RMS={rms:.2f} deg/s, SS_mean={ss_mean:.3f} deg/s, "
+                  f"SS_max={ss_max:.3f} deg/s, peak={peak:.2f} deg/s")
+
         if plot and len(ep_data["times"]) > 0:
             plot_episode(ep_data, ep + 1, save_dir="./plots/pid")
 
@@ -535,8 +607,9 @@ def evaluate(num_episodes: int = 5, render: bool = True, plot: bool = False,
 
     print("\n=== PID Evaluation Summary ===")
     print(f"Episodes:    {num_episodes}")
-    print(f"Survival:    {sum(1 for l in episode_lengths if l >= 512)}/{num_episodes} "
-          f"({100*sum(1 for l in episode_lengths if l >= 512)/num_episodes:.0f}%)")
+    max_steps = env.max_episode_steps
+    print(f"Survival:    {sum(1 for l in episode_lengths if l >= max_steps)}/{num_episodes} "
+          f"({100*sum(1 for l in episode_lengths if l >= max_steps)/num_episodes:.0f}%)")
     print(f"Mean reward: {np.mean(episode_rewards):.2f} +/- {np.std(episode_rewards):.2f}")
     print(f"Mean length: {np.mean(episode_lengths):.1f} +/- {np.std(episode_lengths):.1f}")
     print(f"Mean error:  {np.mean(episode_errors):.3f}m")
@@ -552,6 +625,9 @@ def main():
                         help="Save performance plots to ./plots/pid/")
     parser.add_argument("--gains", type=str, default=None,
                         help="Path to custom PID gains JSON file")
+    parser.add_argument("--trajectory", type=str, default=None,
+                        choices=["circle", "eight", "square"],
+                        help="Follow a dynamic trajectory instead of hovering")
     args = parser.parse_args()
 
     evaluate(
@@ -559,6 +635,7 @@ def main():
         render=not args.no_render,
         plot=args.plot,
         gains_file=args.gains,
+        trajectory=args.trajectory,
     )
 
 

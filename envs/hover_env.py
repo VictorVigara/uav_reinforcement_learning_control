@@ -13,7 +13,8 @@ from utils.drone_config import MAX_MOTOR_THRUST, MAX_TORQUE, YAW_TORQUE_COEFF, A
 
 class HoverEnv(gym.Env):
     """Quadrotor hovering environment."""
-    def __init__(self, render_mode: str | None = None, max_motor_thrust: float = MAX_MOTOR_THRUST, yaw_torque_coeff: float = YAW_TORQUE_COEFF,
+    def __init__(self, render_mode: str | None = None, model_name: str = "x500.xml",
+                 max_motor_thrust: float = MAX_MOTOR_THRUST, yaw_torque_coeff: float = YAW_TORQUE_COEFF,
                  arm_length: float = ARM_LENGTH, max_episode_steps: int = 512,
                  initial_state_bounds: Box | None = None, target_pos_bounds: Box | None = None):
         super().__init__()
@@ -67,7 +68,7 @@ class HoverEnv(gym.Env):
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "model",
             "drone",
-            "drone.xml"
+            model_name,
         )
         # Load MuJoCo model and initialize simulation data
         self.model = mujoco.MjModel.from_xml_path(model_path)
