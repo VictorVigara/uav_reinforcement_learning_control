@@ -1,0 +1,15 @@
+# Custom 150 g drone (the original drone of this repo).
+# Commanded as total thrust + body torques; RateControlWrapper turns that into
+# thrust + body rates. Keep model/drone/drone.xml in sync by hand: ctrlrange
+# and the keyframe hover ctrl follow max_motor_thrust and mass.
+interface: thrust_torque
+model: model/drone/drone.xml
+
+mass: 0.150                 # kg, measured, including the Raspberry Pi
+inertia: [1.44e-4, 1.46e-4, 2.11e-4]    # kg m^2: roll, pitch, yaw
+arm_length: 0.039799        # m
+max_motor_thrust: 1.47      # N per motor, full battery
+yaw_torque_coeff: 0.0201    # motor reaction torque / thrust
+dt: 0.01                    # s, MuJoCo timestep
+frame_skip: 1               # policy at 100 Hz
+g: 9.81

@@ -11,21 +11,28 @@ Quadrotor hovering control using **Proximal Policy Optimization (PPO)** with **M
 ├── optimize.py               # Optuna hyperparameter optimization for PPO
 ├── debug_training.py         # Diagnostic tool for early episode termination
 ├── pid_controller.py            # Cascaded PID baseline controller
+├── drones/                   # Drone registry: one folder per drone with its params.yaml
+│   ├── __init__.py           # DroneSpec, load_drone()
+│   ├── constraints.py        # Command limits read from skybridge's config
+│   ├── small/                # The custom 150 g drone (default)
+│   └── air65/                # BETAFPV Air65 II
 ├── envs/
-│   ├── __init__.py
-│   ├── hover_env.py          # Gymnasium environment (HoverEnv)
+│   ├── __init__.py           # make_env(drone): picks the environment for a drone
+│   ├── hover_env.py          # HoverEnv: thrust + torque commands
+│   ├── angle_env.py          # AngleModeEnv: Betaflight angle-mode commands (Air65)
+│   ├── betaflight.py         # Simulated Betaflight angle-mode flight controller
+│   ├── sim2real.py           # Delays, sensor rates, noise, randomization helpers
 │   ├── wrappers.py           # Observation wrappers + registry
 │   └── rate_wrapper.py       # CTBR action wrapper (body rates → torques)
+├── sysid/                    # System identification from flight and blackbox logs
 ├── utils/
 │   ├── __init__.py
-│   ├── drone_config.py       # Central drone physical parameters (single source of truth)
+│   ├── drone_config.py       # The default drone's parameters as constants
 │   ├── state.py              # QuadState — 12D state with quaternion↔Euler conversion
 │   └── normalization.py      # Observation/action normalization utilities
 ├── model/
-│   └── drone/
-│       ├── drone.xml         # MuJoCo drone model definition
-│       ├── scene.xml         # Scene configuration
-│       └── assets/           # STL mesh files
+│   ├── drone/                # 150 g drone: drone.xml, scene.xml, STL meshes
+│   └── air65/                # Air65: drone.xml, scene.xml
 ├── ros2_ws/                  # ROS2 workspace for real-world deployment
 │   └── src/rl_drone_control/ # Policy node, velocity estimator (see its README)
 ├── models_trained/           # Saved model checkpoints (per training run)
@@ -48,29 +55,81 @@ Quadrotor hovering control using **Proximal Policy Optimization (PPO)** with **M
 
 The drone has 4 motors each producing 0–13 N of thrust. Motor commands are computed from thrust/torque demands using an inverse mixer matrix.
 
-## Drone Configuration
+## Drones
 
-All physical drone parameters are centralized in `utils/drone_config.py` — the single source of truth for the entire codebase. Every module (`hover_env.py`, `rate_wrapper.py`, `pid_controller.py`, `evaluate.py`) imports from here instead of hardcoding values.
+The repo can train for more than one drone. Each drone is a folder in `drones/` with a `params.yaml`, plus a MuJoCo model under `model/`:
 
-| Parameter | Symbol | Value | Unit |
-|---|---|---|---|
-| Max motor thrust | `MAX_MOTOR_THRUST` | 1.372 | N |
-| Arm length | `ARM_LENGTH` | 0.039799 | m |
-| Yaw torque coefficient | `YAW_TORQUE_COEFF` | 0.0201 | — |
-| Mass | `MASS` | 0.3446 | kg |
-| Timestep | `DT` | 0.01 | s |
-| Roll inertia | `IXX` | 6.44e-4 | kg·m² |
-| Pitch inertia | `IYY` | 6.54e-4 | kg·m² |
-| Yaw inertia | `IZZ` | 8.31e-4 | kg·m² |
+| Drone | `--drone` | Commanded as | Environment | Policy rate |
+|---|---|---|---|---|
+| Custom 150 g drone (default) | `small` | total thrust + torques, or body rates through `RateControlWrapper` | `HoverEnv` | 100 Hz |
+| BETAFPV Air65 II | `air65` | Betaflight angle mode: throttle, roll, pitch, yaw rate | `AngleModeEnv` | 50 Hz |
 
-Derived constants (`MAX_TOTAL_THRUST`, `MAX_TORQUE`, `HOVER_THRUST_PER_MOTOR`) are computed automatically from the base parameters.
+```python
+from drones import load_drone
+from envs import make_env
 
-To adapt to a different drone, update the base parameters in `drone_config.py` and keep the MuJoCo XML (`model/drone/drone.xml`) in sync — specifically `ctrlrange` and the keyframe hover ctrl values.
+spec = load_drone("air65")      # DroneSpec: mass, inertia, thrust, timestep, ...
+env = make_env("air65")         # the environment that matches how the drone is commanded
+```
+
+`train.py`, `evaluate.py` and `optimize.py` take the drone from `--drone` (training) or from the run's `config.json` (evaluation). Without the flag everything behaves as before, for the 150 g drone.
+
+`utils/drone_config.py` still exposes the default drone's parameters as constants (`MASS`, `MAX_MOTOR_THRUST`, ...) for `pid_controller.py` and `rate_wrapper.py`. For the 150 g drone, keep `model/drone/drone.xml` in sync with `drones/small/params.yaml` by hand (`ctrlrange` and the keyframe hover ctrl).
+
+### Adding a drone
+
+1. `drones/<name>/params.yaml`: copy an existing one. `interface` says how the drone is commanded and picks the environment (`ENV_FOR_INTERFACE` in `envs/__init__.py`).
+2. `model/<name>/drone.xml`: the MuJoCo model.
+3. Add the drone's default wrapper (or `None`) to `DEFAULT_WRAPPER` in `envs/__init__.py`.
+4. A new way of commanding a drone needs a new environment class registered in `ENV_FOR_INTERFACE`.
+
+## BETAFPV Air65 II
+
+The Air65 is flown from a laptop through skybridge: CRSF commands at 50 Hz into Betaflight angle mode, position and velocity from a depth camera at 30 Hz, attitude from telemetry at about 17 Hz. `AngleModeEnv` (`envs/angle_env.py`) simulates that whole chain, so a policy trained in it sees what the laptop sees.
+
+```bash
+python train.py --drone air65
+python evaluate.py --model ./models_trained/air65_<stamp>/best_model.zip --plot
+```
+
+**Action** (4, normalized to [-1, 1]), in skybridge's units and signs:
+
+| | Range | Sign |
+|---|---|---|
+| throttle | 0.05 to 0.56 of the 1000 to 2000 us span (hover is about 0.305) | |
+| roll angle | ± `max_angle` | + tilts right |
+| pitch angle | ± `max_angle` | + tilts the nose down, flies forward |
+| yaw rate | ± 120 deg/s | + turns right |
+
+**Observation** (16), all measurable on the laptop:
+
+| | Scale | Source |
+|---|---|---|
+| target minus position: forward, left, up | 2 m | camera, rotated by the heading |
+| velocity: forward, left, up | 3 m/s | camera tracker |
+| roll, pitch (same signs as the action) | 60 deg | telemetry. Telemetry pitch has the opposite sign |
+| target heading minus heading (+ left) | 180 deg | skybridge heading estimate |
+| integral of the first three, clipped (reset to 0 when the policy takes over) | 1 m·s | computed on the laptop, once per step |
+| previous action | | |
+
+There is no angular velocity: the laptop does not receive it. The integral lets the policy cancel what it cannot observe directly: the real drone is never trimmed exactly level (1 to 3.6 degrees in the logs) and its hover throttle moves with the battery.
+
+**Command limits come from skybridge.** `drones/constraints.py` reads skybridge's `configs/drone.yaml` (`$SKYBRIDGE_CONFIG`, default `~/skybridge/configs/drone.yaml`). The policy's angle range is `min(betaflight.angle_limit, safety.max_angle)`. After raising the limit in Betaflight and in that YAML, retrain: the action scale changes with it. Every run stores the limits it used in `config.json` under `command_limits`. On a machine without skybridge the committed snapshot `drones/air65/skybridge_drone.yaml` is used, with a warning; refresh it with `python -m drones.constraints --sync air65`.
+
+**What is simulated** (numbers and their sources are in `drones/air65/params.yaml`):
+
+- Betaflight (`envs/betaflight.py`): RC smoothing, angle loop, rate loop, mixer with airmode, motor lag, and the throttle-to-thrust curve, at 250 Hz.
+- The link (`envs/sim2real.py`): command delay, camera rate, latency and dropped frames, the tracker's velocity lag, slow telemetry with its own latency, sensor noise.
+- Per-episode variation: mass, battery (thrust scale), drag, motor lag, delays, a level-trim error of up to 3 degrees, a heading error, and slow air disturbances.
+
+### System identification
+
+The model is fitted to recorded data. See [`sysid/README.md`](sysid/README.md) for the pipeline and the current results.
 
 ## Installation
 
 ```bash
-pip install gymnasium stable-baselines3 mujoco numpy scipy matplotlib
+pip install gymnasium stable-baselines3 mujoco numpy scipy matplotlib pyyaml
 ```
 
 ## Training

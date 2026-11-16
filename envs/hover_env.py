@@ -7,19 +7,26 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import QuadState, normalize, denormalize
-from utils.drone_config import MAX_MOTOR_THRUST, MAX_TORQUE, YAW_TORQUE_COEFF, ARM_LENGTH
+from drones import DroneSpec, resolve
 
 
 class HoverEnv(gym.Env):
-    """Quadrotor hovering environment."""
-    def __init__(self, render_mode: str | None = None, max_motor_thrust: float = MAX_MOTOR_THRUST, yaw_torque_coeff: float = YAW_TORQUE_COEFF,
-                 arm_length: float = ARM_LENGTH, max_episode_steps: int = 512,
-                 initial_state_bounds: Box | None = None, target_pos_bounds: Box | None = None):
+    """Quadrotor hovering environment, commanded as total thrust + body torques.
+
+    `drone` names a drone in the registry (`drones/<name>/params.yaml`) or is a
+    `DroneSpec`. The thrust and geometry arguments override the spec's values.
+    """
+    def __init__(self, render_mode: str | None = None, max_motor_thrust: float | None = None,
+                 yaw_torque_coeff: float | None = None, arm_length: float | None = None,
+                 max_episode_steps: int = 512,
+                 initial_state_bounds: Box | None = None, target_pos_bounds: Box | None = None,
+                 drone: str | DroneSpec | None = None):
         super().__init__()
         # Params
-        self.max_motor_thrust = max_motor_thrust
-        k = yaw_torque_coeff
-        l = arm_length
+        self.spec = resolve(drone)
+        self.max_motor_thrust = self.spec.max_motor_thrust if max_motor_thrust is None else max_motor_thrust
+        k = self.spec.yaw_torque_coeff if yaw_torque_coeff is None else yaw_torque_coeff
+        l = self.spec.arm_length if arm_length is None else arm_length
         self.max_episode_steps = max_episode_steps
         self.render_mode = render_mode
         self._viewer = None
@@ -55,21 +62,14 @@ class HoverEnv(gym.Env):
 
         # Physical action bounds (before normalization) - thrust in N, torques in N⋅m
         self.max_total_thrust = 4 * self.max_motor_thrust  # 52 N
-        self.max_torque = MAX_TORQUE
+        self.max_torque = self.spec.max_torque
         self._action_bounds = Box(
             low=np.array([0.0, -self.max_torque, -self.max_torque, -self.max_torque], dtype=np.float32),
             high=np.array([self.max_total_thrust, self.max_torque, self.max_torque, self.max_torque], dtype=np.float32),
         )
 
         # Load MuJoCo model
-        model_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "model",
-            "drone",
-            "drone.xml"
-        )
-        # Load MuJoCo model and initialize simulation data
-        self.model = mujoco.MjModel.from_xml_path(model_path)
+        self.model = mujoco.MjModel.from_xml_path(str(self.spec.model_path))
         self.data = mujoco.MjData(self.model)
 
         # Target state (randomized each episode in reset())
@@ -77,8 +77,8 @@ class HoverEnv(gym.Env):
 
         # State tracker
         self._state = QuadState(self._obs_bounds)
-        self.dt = self.model.opt.timestep  # 0.01s
-        self.frame_skip = 1  # Control at 100Hz
+        self.dt = self.model.opt.timestep
+        self.frame_skip = 1  # this env steps the physics once per action
         self._step_count = 0
         self._prev_action = np.zeros(4, dtype=np.float32)
 

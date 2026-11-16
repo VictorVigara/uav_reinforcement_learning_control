@@ -1,0 +1,100 @@
+# BETAFPV Air65 II (65 mm brushless whoop), flown through skybridge:
+# Betaflight angle mode over CRSF at 50 Hz, state from a depth camera.
+#
+# Where each number comes from:
+#   [spec]    manufacturer data
+#   [bbl]     Betaflight blackbox logs of 2026-09-20      (sysid/fit_air65.py)
+#   [flight]  skybridge flight logs of 2026-11-13         (sysid/fit_air65.py)
+#   [replay]  those flights replayed through this sim     (sysid/validate_replay.py --tune)
+#   [est]     an estimate, not measured
+# The command limits (max angle, yaw rate) are NOT here: they come from
+# skybridge's configs/drone.yaml, see drones/constraints.py.
+interface: betaflight_angle
+model: model/air65/drone.xml
+
+# ── Rigid body ──
+mass: 0.028                 # kg [est] 17.8 g dry [spec] + battery + tracking plate. WEIGH IT.
+                            # The throttle curve is tied to the measured hover throttle,
+                            # so an error here hardly changes the accelerations.
+inertia: [8.0e-6, 8.0e-6, 1.3e-5]    # kg m^2 [est] component layout; the blackbox only bounds
+                            # roll to 8e-6..3e-5 and pitch to 5e-6..1e-5. The rate loop is
+                            # modelled closed-loop, so this only matters when motors saturate.
+arm_length: 0.02298         # m [spec] 65 mm diagonal -> 22.98 mm along x and y
+yaw_torque_coeff: 0.006     # m [est] reaction torque per newton of thrust, 31 mm prop
+max_motor_thrust: 0.2335    # N: hover thrust per motor x betaflight.max_thrust_ratio
+dt: 0.004                   # s, physics and simulated flight controller at 250 Hz
+frame_skip: 5               # policy at 50 Hz, the RC rate
+g: 9.81
+
+# ── Flight controller and motors (envs/betaflight.py) ──
+betaflight:
+  hover_throttle: 0.305     # [flight] 0.30-0.32 over three flights; rises as the battery sags
+  min_check: 0.05           # Betaflight min_check 1050
+  thrust_u0: 0.047          # [bbl] rpm ~ (u + 0.047)^0.835 * V^0.86, thrust ~ rpm^2
+  thrust_expo: 1.5          # [bbl] 1.67 from rpm, [flight] 1.4 from climb response
+  max_thrust_ratio: 3.4     # [bbl][est] rpm tops out near 52k, hover is at 28k. The rpm map is
+                            # only measured up to 43 % motor output; above that is extrapolated.
+  motor_tau_up: 0.035       # s [bbl] rpm follows the command with a 30-40 ms lag
+  motor_tau_down: 0.035
+  rc_tau: 0.013             # s, Betaflight RC smoothing (cutoff 37 Hz)
+  level_kp: 5.0             # 1/s, Betaflight level P 50; [replay] agrees
+  angle_ff: 0.7             # [replay]
+  ff_tau: 0.03              # s [replay]
+  rate_tau: [0.02, 0.02, 0.04]   # s [est]; the blackbox logs have no rate setpoint activity
+
+# ── Aerodynamics: linear drag, acceleration per unit velocity (1/s) ──
+aero:
+  drag_xy: 0.2              # [replay] weakly identified: the flights stay below 1 m/s
+  drag_z: 0.33              # [flight] 0.25-0.4
+  gust_accel: [0.0, 0.25]   # m/s^2, 1 sigma of a slowly wandering disturbance [est]: indoor air,
+  gust_tau: 1.0             # s      ground effect. Sized so altitude hold wanders as in flight.
+
+# ── Radio link and sensors, seconds. [a, b] is drawn per episode ──
+link:
+  action_delay: [0.03, 0.07]        # [replay] 0.045: RC tick, ELRS, receiver
+  camera_period: 0.0333             # 30 Hz depth
+  camera_latency: [0.02, 0.05]      # capture to the RC loop; skybridge logs 12-15 ms to output
+  camera_drop: 0.07                 # [flight] 152 of 2310 frames skipped
+  velocity_tau: [0.05, 0.11]        # [replay] 0.08: lag of the tracker's velocity filter
+  attitude_period: [0.05, 0.09]     # [flight] telemetry every 59 ms median, 80-100 ms p95
+  attitude_latency: [0.07, 0.12]    # [replay] 0.09
+
+noise:                      # 1 sigma, per sample [est, checked against the altitude-hold logs]
+  position: 0.004           # m
+  velocity: 0.012           # m/s
+  attitude_deg: 0.3
+
+# ── Per-episode variation ──
+randomize:
+  mass: [0.9, 1.1]
+  thrust: [0.85, 1.15]      # battery: hover throttle 0.30-0.32 in flight, thrust ~ V^1.7 [bbl]
+  drag: [0.5, 2.0]
+  motor_tau: [0.7, 1.3]
+  angle_trim_deg: 3.0       # [replay] the real drone drifts as if tilted 1-3.6 deg at zero stick
+  heading_error_deg: 10.0   # FC yaw drifts about 0.5 deg/s between plate corrections
+
+# ── Task ──
+env:
+  episode_steps: 500        # 10 s at 50 Hz
+  throttle_range: [0.05, 0.56]      # the policy's throttle span, centred on hover
+  max_yaw_rate_dps: 120.0   # tighter than skybridge's limit; hovering needs little yaw
+  max_tilt_deg: 60.0        # beyond this the episode ends
+  obs_pos: 2.0              # observation scales: m, m/s, deg
+  obs_vel: 3.0
+  obs_tilt_deg: 60.0
+  obs_int: 1.0              # m s: where the error integral saturates
+  # true state: x, y, z, roll, pitch, yaw, vx, vy, vz, wx, wy, wz
+  initial:
+    low:  [-0.6, -0.6, 0.3, -0.17, -0.17, -3.14, -0.4, -0.4, -0.3, -0.5, -0.5, -0.5]
+    high: [ 0.6,  0.6, 1.2,  0.17,  0.17,  3.14,  0.4,  0.4,  0.3,  0.5,  0.5,  0.5]
+  target:
+    low:  [-0.6, -0.6, 0.4]
+    high: [ 0.6,  0.6, 1.2]
+  bounds:                   # leaving this box ends the episode (the camera's flight volume)
+    low:  [-1.2, -1.2, 0.05]
+    high: [ 1.2,  1.2, 1.8]
+
+reward:
+  pos_scale: 0.5            # m: reward = exp(-(error / pos_scale)^2)
+  action_rate: 0.05         # cost on the squared change of the normalized action
+  heading: 0.05             # cost on the squared heading error / pi

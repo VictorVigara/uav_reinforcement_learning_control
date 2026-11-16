@@ -41,6 +41,8 @@ conda activate uav
 cd ~/uav_reinforcement_learning_control
 
 # Run training
-python3 train.py
+# DRONE picks the drone from drones/ (default: the 150 g drone), e.g.
+#   DRONE=air65 bsub < train.sh
+python3 train.py --drone "${DRONE:-small}"
 
 echo "Training completed"

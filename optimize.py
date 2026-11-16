@@ -15,7 +15,8 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.env_util import make_vec_env
 
-from envs import HoverEnv, RelPosActWrapper
+from drones import DEFAULT_DRONE, available_drones
+from envs import DEFAULT_WRAPPER, make_env, RelPosActWrapper
 from envs.rate_wrapper import RateControlWrapper
 
 # ---------------------------------------------------------------------------
@@ -24,6 +25,7 @@ from envs.rate_wrapper import RateControlWrapper
 # wrapper_cls = None                # bare HoverEnv (12D obs, direct torques)
 # wrapper_cls = RelPosActWrapper    # 7D obs, direct torques
 wrapper_cls = RateControlWrapper    # 12D obs, body-rate actions (CTBR)
+drone_name = DEFAULT_DRONE          # set by --drone
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +119,8 @@ class TrialEvalCallback(EvalCallback):
 # ---------------------------------------------------------------------------
 
 def _make_env():
-    """Create a HoverEnv, optionally wrapped by wrapper_cls."""
-    env = HoverEnv()
-    if wrapper_cls is not None:
-        env = wrapper_cls(env)
-    return env
+    """Create the drone's environment, optionally wrapped by wrapper_cls."""
+    return make_env(drone_name, wrapper=wrapper_cls)
 
 
 def make_objective(n_timesteps: int, n_envs: int, n_eval_envs: int,
@@ -233,6 +232,7 @@ def print_best_params(study: optuna.Study) -> None:
 
 
 def main():
+    global drone_name, wrapper_cls
     parser = argparse.ArgumentParser(description="Optuna HPO for PPO hover control")
     parser.add_argument("--n-trials", type=int, default=50, help="Max number of trials")
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel Optuna jobs")
@@ -243,7 +243,16 @@ def main():
     parser.add_argument("--storage", type=str, default=None, help="Optuna storage URL (e.g. sqlite:///optuna.db)")
     parser.add_argument("--n-timesteps", type=int, default=500_000, help="Training steps per trial")
     parser.add_argument("--n-envs", type=int, default=8, help="Parallel training envs per trial")
+    parser.add_argument("--drone", default=DEFAULT_DRONE, choices=available_drones(),
+                        help="Drone from the registry in drones/ (default: %(default)s)")
     args = parser.parse_args()
+
+    # Other drones train with their own default wrapper and get their own study.
+    if args.drone != DEFAULT_DRONE:
+        drone_name = args.drone
+        wrapper_cls = DEFAULT_WRAPPER.get(args.drone)
+        if args.study_name == default_study:
+            args.study_name = f"ppo_hover_{args.drone}"
 
     # Faster single-threaded PyTorch
     th.set_num_threads(1)

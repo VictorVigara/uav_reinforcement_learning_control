@@ -1,0 +1,10 @@
+{
+  "action_delay": 0.045,
+  "attitude_latency": 0.09,
+  "angle_ff": 0.7,
+  "ff_tau": 0.03,
+  "level_kp": 5.0,
+  "velocity_tau": 0.08,
+  "drag_xy": 0.2,
+  "drag_z": 0.4
+}

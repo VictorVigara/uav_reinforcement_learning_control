@@ -1,0 +1,65 @@
+<mujoco model="air65">
+  <!-- BETAFPV Air65 II, 65 mm whoop. Body frame: x forward, y left, z up.
+
+       Mass, inertia and thrust limits here are nominal: the environment
+       overwrites them from drones/air65/params.yaml at load, so that file is
+       the single source of truth. Aerodynamic drag is applied by the
+       environment from the fitted model, so MuJoCo's fluid model stays off. -->
+  <compiler autolimits="true"/>
+  <option timestep="0.004"/>
+
+  <default>
+    <geom contype="0" conaffinity="0" mass="0"/>
+    <default class="duct">
+      <geom type="cylinder" size="0.0175 0.007" rgba="0.15 0.15 0.17 1"/>
+    </default>
+    <default class="prop">
+      <geom type="cylinder" size="0.0155 0.0008" rgba="0.2 0.75 0.95 0.45"/>
+    </default>
+    <motor ctrlrange="0 0.25"/>
+  </default>
+
+  <worldbody>
+    <body name="base_link" pos="0 0 0">
+      <joint name="base" type="free"/>
+      <inertial pos="0 0 0" mass="0.028" diaginertia="5.5e-06 8.0e-06 1.25e-05"/>
+
+      <!-- 65 mm motor-to-motor diagonal: motors at +-22.98 mm in x and y -->
+      <geom class="duct" pos=" 0.02298 -0.02298 0"/>
+      <geom class="duct" pos="-0.02298 -0.02298 0"/>
+      <geom class="duct" pos="-0.02298  0.02298 0"/>
+      <geom class="duct" pos=" 0.02298  0.02298 0"/>
+      <geom class="prop" pos=" 0.02298 -0.02298 0.004"/>
+      <geom class="prop" pos="-0.02298 -0.02298 0.004"/>
+      <geom class="prop" pos="-0.02298  0.02298 0.004"/>
+      <geom class="prop" pos=" 0.02298  0.02298 0.004"/>
+      <!-- flight controller, canopy and battery -->
+      <geom type="box" size="0.013 0.013 0.002" pos="0 0 0.002" rgba="0.1 0.35 0.15 1"/>
+      <geom type="box" size="0.030 0.006 0.004" pos="0 0 -0.009" rgba="0.85 0.3 0.1 1"/>
+      <!-- tracking plate seen by the depth camera -->
+      <geom type="box" size="0.002 0.030 0.012" pos="0 0 0.022" rgba="0.95 0.95 0.95 1"/>
+      <!-- nose marker -->
+      <geom type="sphere" size="0.003" pos="0.036 0 0" rgba="1 0.1 0.1 1"/>
+
+      <site name="imu" pos="0 0 0"/>
+      <site name="thrust1" pos=" 0.02298 -0.02298 0"/>   <!-- front right -->
+      <site name="thrust2" pos="-0.02298 -0.02298 0"/>   <!-- rear right -->
+      <site name="thrust3" pos="-0.02298  0.02298 0"/>   <!-- rear left -->
+      <site name="thrust4" pos=" 0.02298  0.02298 0"/>   <!-- front left -->
+    </body>
+  </worldbody>
+
+  <!-- ctrl is thrust in newtons; gear[5] is the reaction torque per newton -->
+  <actuator>
+    <motor name="thrust1" site="thrust1" gear="0 0 1 0 0  0.006"/>
+    <motor name="thrust2" site="thrust2" gear="0 0 1 0 0 -0.006"/>
+    <motor name="thrust3" site="thrust3" gear="0 0 1 0 0  0.006"/>
+    <motor name="thrust4" site="thrust4" gear="0 0 1 0 0 -0.006"/>
+  </actuator>
+
+  <sensor>
+    <gyro name="body_gyro" site="imu"/>
+    <accelerometer name="body_linacc" site="imu"/>
+    <framequat name="body_quat" objtype="site" objname="imu"/>
+  </sensor>
+</mujoco>

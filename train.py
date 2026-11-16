@@ -1,5 +1,6 @@
 """PPO training script for quadrotor hover control."""
 
+import argparse
 import os
 import json
 import inspect
@@ -8,35 +9,40 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
-from envs import HoverEnv, RelPosActWrapper
+from drones import DEFAULT_DRONE, available_drones, load_drone
+from envs import DEFAULT_WRAPPER, make_env as make_drone_env
 from datetime import datetime
 
-from envs.rate_wrapper import RateControlWrapper
 
 def main():
+    parser = argparse.ArgumentParser(description="Train a PPO hover policy")
+    parser.add_argument("--drone", default=DEFAULT_DRONE, choices=available_drones(),
+                        help="Drone from the registry in drones/ (default: %(default)s)")
+    parser.add_argument("--timesteps", type=int, default=10_000_000)
+    parser.add_argument("--n-envs", type=int, default=16)
+    args = parser.parse_args()
+
     # Configuration
-    total_timesteps = 10000000  # 10 million timesteps
-    n_envs = 16
+    spec = load_drone(args.drone)
+    total_timesteps = args.timesteps
+    n_envs = args.n_envs
     checkpoint_freq = 50_000
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = f"./logs/{run_timestamp}"
-    model_dir = f"./models_trained/{run_timestamp}"
+    run_name = run_timestamp if spec.name == DEFAULT_DRONE else f"{spec.name}_{run_timestamp}"
+    log_dir = f"./logs/{run_name}"
+    model_dir = f"./models_trained/{run_name}"
 
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(model_dir, exist_ok=True)
 
-    # Observation wrapper (set to None for base 12D obs, or a wrapper class)
-    # wrapper_cls = RelPosActWrapper
-    wrapper_cls = RateControlWrapper    # was RelPosActWrapper
-
+    # Wrapper on top of the drone's environment: see DEFAULT_WRAPPER in envs/__init__.py
+    wrapper_cls = DEFAULT_WRAPPER.get(spec.name)
     wrapper_name = wrapper_cls.__name__ if wrapper_cls else "none"
 
     def make_env():
-        env = HoverEnv()
-        if wrapper_cls:
-            env = wrapper_cls(env)
-        return env
+        return make_drone_env(spec, wrapper=wrapper_cls)
 
     # Validate environment
     print("Validating environment...")
@@ -45,7 +51,10 @@ def main():
 
     # Create vectorized environments for parallel training
     print(f"Creating {n_envs} parallel environments...")
-    vec_env = make_vec_env(make_env, n_envs=n_envs)
+    # Environments that simulate a flight controller are slow enough per step
+    # to be worth one process each.
+    vec_env_cls = SubprocVecEnv if spec.frame_skip > 1 and n_envs > 1 else None
+    vec_env = make_vec_env(make_env, n_envs=n_envs, vec_env_cls=vec_env_cls)
 
     model = PPO(
         policy="MlpPolicy",
@@ -90,6 +99,16 @@ def main():
     base_env = env_tmp.unwrapped
     config = {
         "timestamp": run_timestamp,
+        "drone": spec.name,
+        "drone_params": spec.params,
+        "command_limits": base_env.limits.as_dict() if hasattr(base_env, "limits") else None,
+        "action_bounds": {
+            "low": base_env._action_bounds.low.tolist(),
+            "high": base_env._action_bounds.high.tolist(),
+        },
+        "control_dt": float(base_env.dt * base_env.frame_skip),
+        "observation_names": list(getattr(base_env, "OBS_NAMES", [])) or None,
+        "action_names": list(getattr(base_env, "ACTION_NAMES", [])) or None,
         "total_timesteps": total_timesteps,
         "n_envs": n_envs,
         "wrapper": wrapper_name,

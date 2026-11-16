@@ -12,9 +12,106 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from stable_baselines3 import PPO
 
-from envs import HoverEnv, get_wrapper
+from envs import AngleModeEnv, get_wrapper, make_env
 from utils.trajectories import TRAJECTORY_GENERATORS
 from ros2_ws.src.rl_drone_control.rl_drone_control.state_estimator import VelocityEstimator
+
+
+def load_env(model_dir: str, **env_kwargs):
+    """Build the environment a policy was trained in, from its config.json.
+
+    Runs from before the drone registry have no "drone" entry: they flew the
+    default drone.
+    """
+    config = {}
+    config_path = os.path.join(model_dir, "config.json")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            config = json.load(f)
+    drone = config.get("drone")
+    wrapper_name = config.get("wrapper", "none")
+    print(f"Drone: {drone or 'default'}, wrapper: {wrapper_name}")
+    env = make_env(drone, wrapper=get_wrapper(wrapper_name), **env_kwargs)
+    return env, config
+
+
+def save_plots(env, data: dict, episode_num: int, save_dir: str):
+    """Pick the plot layout that matches how the drone is commanded."""
+    base_env = env.unwrapped
+    if isinstance(base_env, AngleModeEnv):
+        plot_episode_angle(data, episode_num, save_dir, base_env)
+    else:
+        max_rate = np.rad2deg(env.max_rate_rad) if hasattr(env, "max_rate_rad") else 360.0
+        plot_episode(data, episode_num, save_dir=save_dir, max_rate=max_rate)
+
+
+def plot_episode_angle(data: dict, episode_num: int, save_dir: str, base_env):
+    """Plots for a drone flown in angle mode: commands are throttle, angles and yaw rate."""
+    os.makedirs(save_dir, exist_ok=True)
+    t = np.array(data["times"])
+    pos = np.array(data["positions"])
+    tgt = np.array(data["targets"])
+    att = np.rad2deg(np.array(data["attitudes"]))
+    vel = np.array(data["velocities"])
+    motors = np.array(data["motor_commands"])
+    cmd = np.array([base_env.denormalize_action(a) for a in data["actions"]])
+    pos_err = np.linalg.norm(pos - tgt, axis=1)
+
+    fig, axes = plt.subplots(4, 2, figsize=(14, 15))
+    fig.suptitle(f"Episode {episode_num} ({base_env.spec.name}, angle mode)", fontsize=14)
+
+    ax = axes[0, 0]
+    for i, (label, color) in enumerate(zip(["x", "y", "z"], ["r", "g", "b"])):
+        ax.plot(t, pos[:, i], color=color, label=label)
+        ax.plot(t, tgt[:, i], color=color, linestyle="--", alpha=0.5)
+    ax.set_ylabel("Position (m)"); ax.set_title("Position (dashed = target)"); ax.legend()
+
+    ax = axes[0, 1]
+    ax.plot(t, pos_err, "k")
+    ax.set_ylabel("Error (m)"); ax.set_title(f"Position error (last second: {pos_err[t > t[-1] - 1].mean() * 100:.1f} cm)")
+
+    ax = axes[1, 0]
+    for i, (label, color) in enumerate(zip(["roll", "pitch"], ["r", "g"])):
+        ax.plot(t, att[:, i], color=color, label=f"{label} actual")
+        ax.plot(t, np.rad2deg(cmd[:, i + 1]), color=color, linestyle="--", alpha=0.6, label=f"{label} command")
+    ax.set_ylabel("Angle (deg)"); ax.set_title("Roll and pitch: command vs actual"); ax.legend(fontsize=8, ncol=2)
+
+    ax = axes[1, 1]
+    ax.plot(t, att[:, 2], "b", label="heading")
+    ax.set_ylabel("Heading (deg)"); ax.set_title("Heading and yaw-rate command")
+    ax2 = ax.twinx()
+    ax2.plot(t, -np.rad2deg(cmd[:, 3]), color="0.5", linewidth=0.8, label="yaw rate cmd (left +)")
+    ax2.set_ylabel("deg/s", color="0.5")
+
+    ax = axes[2, 0]
+    for i, label in enumerate(["vx", "vy", "vz"]):
+        ax.plot(t, vel[:, i], label=label)
+    ax.set_ylabel("Velocity (m/s)"); ax.set_title("Velocity"); ax.legend()
+
+    ax = axes[2, 1]
+    ax.plot(t, cmd[:, 0], "k")
+    ax.axhline(base_env.fc.throttle_for_hover(base_env._mass), color="0.6", linestyle="--", linewidth=0.8)
+    ax.set_ylabel("Throttle (0..1)"); ax.set_title("Throttle command (dashed = hover this episode)")
+
+    ax = axes[3, 0]
+    for i in range(4):
+        ax.plot(t, motors[:, i] * 1000 / 9.81, label=f"M{i + 1}")
+    ax.set_ylabel("Thrust (g)"); ax.set_title("Motor thrust"); ax.legend(ncol=4, fontsize=8)
+
+    ax = axes[3, 1]
+    actions = np.array(data["actions"])
+    for i, label in enumerate(base_env.ACTION_NAMES):
+        ax.plot(t, actions[:, i], label=label, linewidth=0.9)
+    ax.set_ylim(-1.1, 1.1)
+    ax.set_ylabel("Action (normalized)"); ax.set_title("Policy actions"); ax.legend(ncol=4, fontsize=8)
+
+    for ax in axes.flat:
+        ax.grid(True, alpha=0.3); ax.set_xlabel("Time (s)")
+    fig.tight_layout()
+    filepath = os.path.join(save_dir, f"episode_{episode_num}.png")
+    fig.savefig(filepath, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Plot saved to {filepath}")
 
 
 def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots",
@@ -351,24 +448,9 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
     # Resolve model directory for saving plots and description
     model_dir = os.path.dirname(os.path.abspath(model_path))
 
-    # Auto-detect wrapper from config.json
-    wrapper_cls = None
-    config_path = os.path.join(model_dir, "config.json")
-    if os.path.exists(config_path):
-        with open(config_path) as f:
-            config = json.load(f)
-        wrapper_cls = get_wrapper(config.get("wrapper", "none"))
-        wrapper_name = config.get("wrapper", "none")
-        print(f"Wrapper: {wrapper_name}")
-
-    # Create environment
-    env = HoverEnv()
-    if wrapper_cls:
-        env = wrapper_cls(env)
+    env, _ = load_env(model_dir)
     base_env = env.unwrapped
-
-    # Get max_rate from wrapper if available (for plot denormalization)
-    max_rate = np.rad2deg(env.max_rate_rad) if hasattr(env, "max_rate_rad") else 360.0
+    cam_distance = 3.0 if isinstance(base_env, AngleModeEnv) else 7.0
 
     episode_rewards = []
     episode_lengths = []
@@ -392,7 +474,7 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
         if render:
             viewer = mujoco.viewer.launch_passive(base_env.model, base_env.data)
             viewer.cam.lookat[:] = [0.0, 0.0, 0.8]
-            viewer.cam.distance = 7.0
+            viewer.cam.distance = cam_distance
             viewer.cam.azimuth = 135
             viewer.cam.elevation = -25
 
@@ -454,8 +536,7 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
         print(f"  {status} after {step_count} steps, total reward: {total_reward:.2f}")
 
         if plot and len(ep_data["times"]) > 0:
-            plot_episode(ep_data, ep + 1, save_dir=os.path.join(model_dir, "plots"),
-                        max_rate=max_rate)
+            save_plots(env, ep_data, ep + 1, os.path.join(model_dir, "plots"))
 
     env.close()
 
@@ -499,51 +580,46 @@ def evaluate_trajectory(model_path: str, trajectory: str = "eight",
     model = PPO.load(model_path, device="cpu")
     model_dir = os.path.dirname(os.path.abspath(model_path))
 
-    # Auto-detect wrapper from config.json
-    wrapper_cls = None
-    config_path = os.path.join(model_dir, "config.json")
-    if os.path.exists(config_path):
-        with open(config_path) as f:
-            config = json.load(f)
-        wrapper_cls = get_wrapper(config.get("wrapper", "none"))
-        print(f"Wrapper: {config.get('wrapper', 'none')}")
-
     # Create environment with extended episode length
     effective_max = max_steps if max_steps > 0 else 100_000
-    env = HoverEnv(max_episode_steps=effective_max)
-    if wrapper_cls:
-        env = wrapper_cls(env)
+    env, _ = load_env(model_dir, max_episode_steps=effective_max)
     base_env = env.unwrapped
+    angle_mode = isinstance(base_env, AngleModeEnv)
 
-    max_rate = np.rad2deg(env.max_rate_rad) if hasattr(env, "max_rate_rad") else 360.0
-
-    # Generate waypoints
+    # Generate waypoints. A drone with its own flight volume gets a path that fits inside it.
     gen_fn = TRAJECTORY_GENERATORS[trajectory]
-    waypoints = gen_fn(spacing=spacing)
+    if angle_mode:
+        box = base_env._target_pos_bounds
+        half = float(min(box.high[0], box.high[1], -box.low[0], -box.low[1]))
+        center = np.array([0.0, 0.0, float(box.low[2] + box.high[2]) / 2])
+        size = {"side_length": 1.6 * half} if trajectory == "square" else {"radius": half}
+        waypoints = gen_fn(spacing=spacing, center=center, **size)
+    else:
+        waypoints = gen_fn(spacing=spacing)
     num_waypoints = len(waypoints)
     print(f"Trajectory: {trajectory}, {num_waypoints} waypoints, spacing={spacing}m")
 
-    # Reset environment
-    obs, info = env.reset()
-
-    # Override initial state: start at first waypoint, identity quaternion, zero velocities
+    # Start at the first waypoint, level and at rest, heading for the second.
     start_pos = waypoints[0]
-    qpos_init = np.array([start_pos[0], start_pos[1], start_pos[2], 1.0, 0.0, 0.0, 0.0])
-    qvel_init = np.zeros(6)
-    base_env.set_state(qpos_init, qvel_init)
-
-    # Set second waypoint as target (drone is already at the first)
     wp_idx = 1 % num_waypoints
-    base_env.target_state.state[0:3] = waypoints[wp_idx].astype(np.float32)
+    if angle_mode:
+        start_state = np.concatenate([start_pos, np.zeros(9)])
+        obs, info = env.reset(options={"state": start_state, "target": waypoints[wp_idx]})
+    else:
+        obs, info = env.reset()
+        qpos_init = np.array([start_pos[0], start_pos[1], start_pos[2], 1.0, 0.0, 0.0, 0.0])
+        qvel_init = np.zeros(6)
+        base_env.set_state(qpos_init, qvel_init)
+        base_env.target_state.state[0:3] = waypoints[wp_idx].astype(np.float32)
 
-    # Re-obtain observation after state override
-    obs = base_env._get_obs()
-    if hasattr(env, 'observation') and callable(env.observation):
-        obs = env.observation(obs)
+        # Re-obtain observation after state override
+        obs = base_env._get_obs()
+        if hasattr(env, 'observation') and callable(env.observation):
+            obs = env.observation(obs)
 
-    # Reset wrapper integral state if using rate control wrapper
-    if hasattr(env, '_rate_int_torque'):
-        env._rate_int_torque = np.zeros(3)
+        # Reset wrapper integral state if using rate control wrapper
+        if hasattr(env, '_rate_int_torque'):
+            env._rate_int_torque = np.zeros(3)
 
     # Setup viewer
     viewer = None
@@ -647,9 +723,7 @@ def evaluate_trajectory(model_path: str, trajectory: str = "eight",
     print(f"Total reward:      {total_reward:.2f}")
 
     if len(ep_data["times"]) > 0:
-        plot_episode(ep_data, episode_num=0,
-                     save_dir=os.path.join(model_dir, "plots_trajectory"),
-                     max_rate=max_rate)
+        save_plots(env, ep_data, 0, os.path.join(model_dir, "plots_trajectory"))
 
 
 def evaluate_velocity_estimator(model_path: str, alphas: list[float],
@@ -668,19 +742,11 @@ def evaluate_velocity_estimator(model_path: str, alphas: list[float],
     model = PPO.load(model_path, device="cpu")
     model_dir = os.path.dirname(os.path.abspath(model_path))
 
-    # Auto-detect wrapper
-    wrapper_cls = None
-    config_path = os.path.join(model_dir, "config.json")
-    if os.path.exists(config_path):
-        with open(config_path) as f:
-            config = json.load(f)
-        wrapper_cls = get_wrapper(config.get("wrapper", "none"))
-        print(f"Wrapper: {config.get('wrapper', 'none')}")
-
-    env = HoverEnv(max_episode_steps=max_steps)
-    if wrapper_cls:
-        env = wrapper_cls(env)
+    env, _ = load_env(model_dir, max_episode_steps=max_steps)
     base_env = env.unwrapped
+    if isinstance(base_env, AngleModeEnv):
+        raise SystemExit("--test-velocity is for drones whose policy observes the full 12D state; "
+                         f"{base_env.spec.name} already simulates its own velocity sensing.")
 
     sim_dt = base_env.dt * base_env.frame_skip
 
