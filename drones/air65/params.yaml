@@ -83,6 +83,9 @@ env:
   obs_vel: 3.0
   obs_tilt_deg: 60.0
   obs_int: 1.0              # m s: where the error integral saturates
+  int_zone: 0.3             # m: an axis integrates only while its error is below this (no windup on approach)
+  action_history: 10        # commands in the observation (200 ms): covers the worst action delay plus
+                            # attitude latency (70 + 120 ms). 1 = the original 16D observation.
   # true state: x, y, z, roll, pitch, yaw, vx, vy, vz, wx, wy, wz
   initial:
     low:  [-0.6, -0.6, 0.3, -0.17, -0.17, -3.14, -0.4, -0.4, -0.3, -0.5, -0.5, -0.5]
@@ -95,6 +98,10 @@ env:
     high: [ 1.2,  1.2, 1.8]
 
 reward:
-  pos_scale: 0.5            # m: reward = exp(-(error / pos_scale)^2)
-  action_rate: 0.05         # cost on the squared change of the normalized action
+  alive: 0.2                # per step: keeps the reward positive far from the target, so crashing never pays
+  pos_scale: 0.5            # m: broad term exp(-(error / pos_scale)^2), finds the target
+  pos_fine: 1.0             # weight of a narrow term that rewards staying on it:
+  pos_fine_scale: 0.1       # m, 5 cm error -> 0.78, 10 cm -> 0.37 (the broad term alone gives 0.96 at 10 cm)
+  action_rate: 0.5          # cost on the squared change of the normalized action (was 0.05: negligible)
+  velocity: 0.05            # cost on the squared velocity, m^2/s^2: penalises oscillating around the target
   heading: 0.05             # cost on the squared heading error / pi

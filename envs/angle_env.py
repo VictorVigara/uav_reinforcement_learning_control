@@ -5,12 +5,20 @@ This is the laptop's view of a drone like the BETAFPV Air65 behind skybridge:
     action       [throttle, roll angle, pitch angle, yaw rate], at the RC rate (50 Hz)
     observation  what the laptop can measure: position and velocity from the
                  depth camera, roll/pitch/heading from telemetry, the running
-                 integral of the position error, and its own last command.
+                 integral of the position error, and its own last few commands.
                  No body rates.
 
 The integral is there because the real drone is never trimmed level and its
 hover throttle moves with the battery: a policy that only sees the current
-error would settle beside the target.
+error would settle beside the target. It is kept in the world frame (it must not
+turn with the drone while it yaws) and only grows near the target, so it does
+not wind up on the way there.
+
+The command history is there because of the delays: a command takes 30-70 ms to
+reach the drone and the attitude the policy sees is 100-200 ms old. A policy
+that only knows its last command cannot tell which of its earlier ones are still
+on their way, reacts to stale data and oscillates. `env.action_history` sets how
+many commands it sees (1 gives the original 16D observation).
 
 Sign conventions, chosen to match skybridge's `set_angle()`:
     roll  +  tilts right          pitch +  tilts the nose down (flies forward)
@@ -61,9 +69,8 @@ class AngleModeEnv(HoverEnv):
         noise: sensor noise on or off.
     """
 
-    OBS_NAMES = ("err_forward", "err_left", "err_up", "vel_forward", "vel_left", "vel_up",
-                 "roll", "pitch", "heading_err", "int_forward", "int_left", "int_up",
-                 "prev_throttle", "prev_roll", "prev_pitch", "prev_yaw_rate")
+    SENSED_NAMES = ("err_forward", "err_left", "err_up", "vel_forward", "vel_left", "vel_up",
+                    "roll", "pitch", "heading_err", "int_forward", "int_left", "int_up")
     ACTION_NAMES = ("throttle", "roll", "pitch", "yaw_rate")
 
     def __init__(self, drone: str | DroneSpec = "air65", render_mode: str | None = None,
@@ -96,10 +103,17 @@ class AngleModeEnv(HoverEnv):
             high=np.array([thr_hi, angle, angle, yaw_rate], dtype=np.float32))
         self.action_space = Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
-        # ── Observation ──
-        self.observation_space = Box(low=-1.0, high=1.0, shape=(16,), dtype=np.float32)
+        # ── Observation: what is sensed, then the last `history` commands, newest first ──
+        self._history = int(cfg.get("action_history", 1))
+        if self._history < 1:
+            raise ValueError("env.action_history must be at least 1")
+        self.OBS_NAMES = self.SENSED_NAMES + tuple(
+            f"prev{'' if k == 0 else k + 1}_{name}" for k in range(self._history) for name in self.ACTION_NAMES)
+        self.observation_space = Box(low=-1.0, high=1.0, shape=(len(self.OBS_NAMES),), dtype=np.float32)
         pos, vel, tilt = cfg.get("obs_pos", 2.0), cfg.get("obs_vel", 3.0), np.deg2rad(cfg.get("obs_tilt_deg", 60.0))
         self._int_limit = float(cfg.get("obs_int", 1.0))    # m s: the integral saturates here
+        zone = cfg.get("int_zone")                          # m: integrate an axis only while its error is below this
+        self._int_zone = float(zone) if zone is not None else np.inf
         self._obs_scale = np.array([pos] * 3 + [vel] * 3 + [tilt, tilt, np.pi] + [self._int_limit] * 3,
                                    dtype=np.float32)
         self._err_int = np.zeros(3)
@@ -114,7 +128,7 @@ class AngleModeEnv(HoverEnv):
         self._state = QuadState()
         # Recorded in a run's config.json: the scale of each observation (see OBS_NAMES)
         # and the true-state box that ends an episode.
-        full_scale = np.concatenate([self._obs_scale, np.ones(4, dtype=np.float32)])
+        full_scale = np.concatenate([self._obs_scale, np.ones(4 * self._history, dtype=np.float32)])
         self._obs_bounds = Box(low=-full_scale, high=full_scale)
         free = np.full(6, np.inf, dtype=np.float32)
         tilt = np.array([self._max_tilt, self._max_tilt, np.pi], dtype=np.float32)
@@ -201,26 +215,34 @@ class AngleModeEnv(HoverEnv):
                 "roll": att[0], "pitch": att[1], "heading": att[2]}
 
     def _get_obs(self) -> np.ndarray:
-        """16D: target error and velocity in the heading frame, roll, pitch, heading error,
-        integral of the error (heading frame, clipped), last action."""
+        """Target error and velocity in the heading frame, roll, pitch, heading error,
+        integral of the error (heading frame, clipped), then the last commands, newest first."""
         m = self.measurements()
         c, s = np.cos(m["heading"]), np.sin(m["heading"])
         to_heading = lambda v: np.array([c * v[0] + s * v[1], -s * v[0] + c * v[1], v[2]])
-        err = to_heading(self.target_state.position - m["pos"])
+        err_world = self.target_state.position - m["pos"]
+        err = to_heading(err_world)
         vel = to_heading(m["vel"])
         self._heading_err = _wrap(self.target_heading - m["heading"])
         if self._integrate:     # once per policy step, not at reset
-            self._err_int = np.clip(self._err_int + err * self.control_dt, -self._int_limit, self._int_limit)
-        sensed = np.concatenate([err, vel, [m["roll"], m["pitch"], self._heading_err], self._err_int]) / self._obs_scale
-        return np.concatenate([np.clip(sensed, -1.0, 1.0), self._prev_action]).astype(np.float32)
+            near = np.abs(err_world) < self._int_zone
+            self._err_int = np.clip(self._err_int + near * err_world * self.control_dt,
+                                    -self._int_limit, self._int_limit)
+        sensed = np.concatenate([err, vel, [m["roll"], m["pitch"], self._heading_err],
+                                 to_heading(self._err_int)]) / self._obs_scale
+        return np.concatenate([np.clip(sensed, -1.0, 1.0), self._action_hist.ravel()]).astype(np.float32)
 
     # ── reward and termination (true state) ──
     def _get_reward(self) -> float:
-        """Gaussian of the true position error, minus small costs for jerky commands and heading error."""
+        """Gaussians of the true position error (a broad one to find the target, a narrow one
+        to stay on it), minus costs for jerky commands, velocity and heading error."""
         r = self._reward
         pos_error = float(np.linalg.norm(self._state.position - self.target_state.position))
-        reward = np.exp(-(pos_error / r.get("pos_scale", 1.0)) ** 2)
+        reward = r.get("alive", 0.0) + np.exp(-(pos_error / r.get("pos_scale", 1.0)) ** 2)
+        if r.get("pos_fine", 0.0):
+            reward += r["pos_fine"] * np.exp(-(pos_error / r["pos_fine_scale"]) ** 2)
         reward -= r.get("action_rate", 0.0) * float(np.mean(self._action_change ** 2))
+        reward -= r.get("velocity", 0.0) * float(np.dot(self._state.velocity, self._state.velocity))
         reward -= r.get("heading", 0.0) * (_wrap(self.target_heading - float(self._state.attitude[2])) / np.pi) ** 2
         return float(reward)
 
@@ -264,6 +286,8 @@ class AngleModeEnv(HoverEnv):
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
         self._action_change = action - self._prev_action
+        self._action_hist = np.roll(self._action_hist, 1, axis=0)
+        self._action_hist[0] = action
         self._prev_action = action.copy()
         command = self.denormalize_action(action)
         thrust = self._advance(command)
@@ -311,6 +335,7 @@ class AngleModeEnv(HoverEnv):
         self.fc.reset(throttle=start[0], roll=start[1], pitch=start[2])
         self._command_line.reset((start[0], start[1], start[2], -start[3]))
         self._prev_action = np.clip(self.normalize_command(start), -1.0, 1.0)
+        self._action_hist = np.tile(self._prev_action, (self._history, 1))
         self._action_change = np.zeros(4, dtype=np.float32)
 
         pos, vel = self.data.qpos[0:3], self.data.qvel[0:3]

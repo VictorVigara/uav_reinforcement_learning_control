@@ -101,7 +101,7 @@ python evaluate.py --model ./models_trained/air65_<stamp>/best_model.zip --plot
 | pitch angle | ± `max_angle` | + tilts the nose down, flies forward |
 | yaw rate | ± 120 deg/s | + turns right |
 
-**Observation** (16), all measurable on the laptop:
+**Observation** (12 + 4 × `action_history`, 52 by default), all measurable on the laptop:
 
 | | Scale | Source |
 |---|---|---|
@@ -109,10 +109,14 @@ python evaluate.py --model ./models_trained/air65_<stamp>/best_model.zip --plot
 | velocity: forward, left, up | 3 m/s | camera tracker |
 | roll, pitch (same signs as the action) | 60 deg | telemetry. Telemetry pitch has the opposite sign |
 | target heading minus heading (+ left) | 180 deg | skybridge heading estimate |
-| integral of the first three, clipped (reset to 0 when the policy takes over) | 1 m·s | computed on the laptop, once per step |
-| previous action | | |
+| integral of the position error, clipped, rotated by the heading (reset to 0 when the policy takes over) | 1 m·s | computed on the laptop, once per step: summed in the world frame, an axis only while its error is under `int_zone` (0.3 m) |
+| last `action_history` actions, newest first (10 = 200 ms) | | the commands the laptop sent |
 
 There is no angular velocity: the laptop does not receive it. The integral lets the policy cancel what it cannot observe directly: the real drone is never trimmed exactly level (1 to 3.6 degrees in the logs) and its hover throttle moves with the battery.
+
+The command history is what lets the policy cope with the delays (30-70 ms to the motors, attitude 100-200 ms old). With only the last command it cannot tell which commands are still on their way: the first Air65 policy (`air65_20261115_175353`, 16D observation) oscillated by about 10 cm around the target, at 3 cm with the delays removed. Runs record their drone parameters in `config.json`, and `evaluate.py` rebuilds the environment from them, so older runs still load.
+
+**Reward**: `alive + exp(-(e/0.5)²) + exp(-(e/0.1)²)` on the true position error `e`, minus costs on the change of the action, the squared velocity and the heading error (weights in the `reward` section of `params.yaml`). The broad Gaussian finds the target, the narrow one makes holding it within a few centimetres worth something, and the velocity and action-change costs make oscillating around it cost reward.
 
 **Command limits come from skybridge.** `drones/constraints.py` reads skybridge's `configs/drone.yaml` (`$SKYBRIDGE_CONFIG`, default `~/skybridge/configs/drone.yaml`). The policy's angle range is `min(betaflight.angle_limit, safety.max_angle)`. After raising the limit in Betaflight and in that YAML, retrain: the action scale changes with it. Every run stores the limits it used in `config.json` under `command_limits`. On a machine without skybridge the committed snapshot `drones/air65/skybridge_drone.yaml` is used, with a warning; refresh it with `python -m drones.constraints --sync air65`.
 
