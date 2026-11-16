@@ -71,9 +71,14 @@ def load_drone(name: str = DEFAULT_DRONE) -> DroneSpec:
     path = DRONES_DIR / name / "params.yaml"
     if not path.exists():
         raise ValueError(f"unknown drone {name!r}; available: {available_drones()}")
-    raw = yaml.safe_load(path.read_text())
+    return spec_from_params(name, yaml.safe_load(path.read_text()))
+
+
+def spec_from_params(name: str, raw: dict[str, Any]) -> DroneSpec:
+    """A DroneSpec from a params dictionary: a params.yaml, or the copy a training run
+    saved in its config.json (so an old policy runs in the environment it was trained in)."""
     if raw["interface"] not in INTERFACES:
-        raise ValueError(f"{path}: interface must be one of {INTERFACES}")
+        raise ValueError(f"drone {name!r}: interface must be one of {INTERFACES}")
     return DroneSpec(
         name=name,
         interface=raw["interface"],

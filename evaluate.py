@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from stable_baselines3 import PPO
 
+from drones import spec_from_params
 from envs import AngleModeEnv, get_wrapper, make_env
 from utils.trajectories import TRAJECTORY_GENERATORS
 from ros2_ws.src.rl_drone_control.rl_drone_control.state_estimator import VelocityEstimator
@@ -21,7 +22,8 @@ def load_env(model_dir: str, **env_kwargs):
     """Build the environment a policy was trained in, from its config.json.
 
     Runs from before the drone registry have no "drone" entry: they flew the
-    default drone.
+    default drone. Runs that saved their drone parameters are rebuilt from those,
+    not from the current params.yaml, so the observation layout matches the policy.
     """
     config = {}
     config_path = os.path.join(model_dir, "config.json")
@@ -31,6 +33,8 @@ def load_env(model_dir: str, **env_kwargs):
     drone = config.get("drone")
     wrapper_name = config.get("wrapper", "none")
     print(f"Drone: {drone or 'default'}, wrapper: {wrapper_name}")
+    if drone and config.get("drone_params"):
+        drone = spec_from_params(drone, config["drone_params"])
     env = make_env(drone, wrapper=get_wrapper(wrapper_name), **env_kwargs)
     return env, config
 
