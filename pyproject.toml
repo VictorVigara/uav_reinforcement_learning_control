@@ -1,0 +1,33 @@
+[project]
+name = "uav-reinforcement-learning-control"
+version = "0.1.0"
+description = "MuJoCo UAV hover/control with reinforcement learning"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "mujoco>=3.4.0",
+    "gymnasium>=1.2.3",
+    "stable-baselines3[extra]>=2.7.1", # extra pulls tensorboard, tqdm, rich (progress_bar=True)
+    "torch>=2.10.0",
+    "numpy>=2.2.5",
+    "scipy>=1.15.3",
+    "matplotlib>=3.10.8",
+    "optuna>=4.7.0",
+    "pyyaml>=6.0.3",
+]
+
+[project.optional-dependencies]
+# sysid/: Betaflight blackbox decoding and .rrd flight-log extraction
+sysid = [
+    "orangebox>=0.4.0",
+    "rerun-sdk",
+]
+# icra22_optuna_lab.py
+lab = [
+    "sb3-contrib>=2.7.0",
+    "gym>=0.26.2",
+]
+
+[tool.uv]
+# Scripts project, not an installable package
+package = false
