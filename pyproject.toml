@@ -31,3 +31,15 @@ lab = [
 [tool.uv]
 # Scripts project, not an installable package
 package = false
+
+# CUDA 12.8 torch wheels: needed for RTX 50-series (Blackwell, sm_120) GPUs.
+# Applies on Linux and Windows; macOS falls back to the default PyPI wheel.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]

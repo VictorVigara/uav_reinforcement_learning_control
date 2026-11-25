@@ -44,6 +44,7 @@ class CommandLimits:
     min_check: float            # throttle fraction below which Betaflight's throttle is 0
     rc_hz: float                # command rate
     source: str                 # the file these came from
+    yaw_curve_dps: float = 0.0  # yaw rate at full stick (Betaflight's own curve, no safety clamp)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -89,6 +90,7 @@ def load_limits(drone: str = "air65") -> CommandLimits:
         min_check=(float(bf.get("min_check", 1050)) - 1000.0) / 1000.0,
         rc_hz=float(raw.get("serial", {}).get("rc_hz", 50)),
         source=str(path),
+        yaw_curve_dps=yaw_curve_max,
     )
 
 

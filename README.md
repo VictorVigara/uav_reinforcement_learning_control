@@ -8,6 +8,8 @@ Quadrotor hovering control using **Proximal Policy Optimization (PPO)** with **M
 .
 ├── train.py                  # Training script (PPO via Stable Baselines3)
 ├── evaluate.py               # Evaluation, visualization, and plotting
+├── evaluate_althold.py       # Altitude-hold policy vs a PI baseline, with plots
+├── rc_sim.py                 # Fly the simulated Air65 with the real radio (optionally with altitude hold)
 ├── optimize.py               # Optuna hyperparameter optimization for PPO
 ├── debug_training.py         # Diagnostic tool for early episode termination
 ├── pid_controller.py            # Cascaded PID baseline controller
@@ -20,6 +22,7 @@ Quadrotor hovering control using **Proximal Policy Optimization (PPO)** with **M
 │   ├── __init__.py           # make_env(drone): picks the environment for a drone
 │   ├── hover_env.py          # HoverEnv: thrust + torque commands
 │   ├── angle_env.py          # AngleModeEnv: Betaflight angle-mode commands (Air65)
+│   ├── althold_env.py        # AltHoldEnv: pilot flies roll/pitch/yaw, the policy throttle (Air65)
 │   ├── betaflight.py         # Simulated Betaflight angle-mode flight controller
 │   ├── sim2real.py           # Delays, sensor rates, noise, randomization helpers
 │   ├── wrappers.py           # Observation wrappers + registry
@@ -126,6 +129,85 @@ The command history is what lets the policy cope with the delays (30-70 ms to th
 - The link (`envs/sim2real.py`): command delay, camera rate, latency and dropped frames, the tracker's velocity lag, slow telemetry with its own latency, sensor noise.
 - Per-episode variation: mass, battery (thrust scale), drag, motor lag, delays, a level-trim error of up to 3 degrees, a heading error, and slow air disturbances.
 
+### Altitude hold: the pilot flies, the policy holds altitude
+
+The pilot flies roll, pitch and yaw with the radio. The policy only sets throttle, and holds the altitude the camera read when it was engaged. `AltHoldEnv` (`envs/althold_env.py`) is built on `AngleModeEnv`: it uses the same Betaflight model, link and camera, and a simulated pilot flies it. The aim is to go from sim straight to the real drone with no tuning on the real drone. To get there, everything the identification could not pin down is randomized widely, and the policy is only shown what the laptop can measure.
+
+```bash
+python train.py --drone air65 --task althold --timesteps 10000000 --n-envs 8
+python evaluate_althold.py models_trained/air65_althold_<stamp>      # policy vs PI, plots in plots/
+python rc_sim.py --policy models_trained/air65_althold_<stamp>        # fly it with the real radio
+```
+
+**Action** (1, normalized to [-1, 1]): throttle over `althold.throttle_range` (0.05 to 0.56). The midpoint 0.305 is the nominal hover.
+
+**Observation** (4 + 4 × `stick_history` + `throttle_history`, 34 by default). It has no attitude telemetry, which is 100-200 ms old and noisy. The pilot's sticks stand in for it: in angle mode a stick asks for an angle, so the sticks say how far the drone is about to tilt and how much thrust will go sideways.
+
+| | Scale | Source |
+|---|---|---|
+| target altitude minus altitude | 1 m | camera |
+| climb rate | 2 m/s | camera tracker |
+| integral of the altitude error, clipped (only within `int_zone`, 0.3 m, of the target) | 0.5 m·s | laptop, once per tick |
+| age of the newest camera data | 0.5 s | laptop |
+| last `stick_history` (5 = 100 ms) stick commands, newest first: roll, pitch (/ `angle_limit`), yaw rate (/ full-stick rate), tilt term `1/(cos r·cos p) − 1` (/ its value at full stick) | | radio |
+| last `throttle_history` (10 = 200 ms) throttle commands, newest first | | what the laptop sent |
+
+The integral covers the unknown hover throttle: mass, battery, and a thrust curve that is not quite right. The stick history covers the drone reaching a commanded angle only 100-200 ms later. The camera age tells the policy when its data is stale.
+
+`AltHoldObserver` builds this observation and `AltHoldAssist` runs a policy on it. Neither depends on MuJoCo, so the real drone's code imports them and builds exactly the observation the policy was trained on. `AltHoldAssist` also holds the camera timeout: if the camera data gets older than `timeout` (1 s by default), the throttle goes to 0 and stays there until the policy is engaged again. It does not jump back when the camera returns.
+
+**Reward**: `alive + exp(-(e/0.3)²) + exp(-(e/0.05)²)` on the true altitude error `e`, minus costs on the squared true climb rate and the squared change of the throttle (`althold.reward`). An episode ends at the floor (0.05 m), at the ceiling (2.2 m) or at 75° of tilt. Leaving the area sideways does not end it, because that is the pilot's job.
+
+**Episodes**: 20 s. They start in flight at 0.4-1.4 m, with up to ±0.5 m/s of climb and 10° of tilt. The pilot's throttle at hand-over is ±10 % off hover. In half the episodes the target is offset by up to ±0.3 m, so the policy also learns to come back after a sag.
+
+**The simulated pilot** (`SimPilot`, `althold.pilot`) pulls the drone back towards the centre of the view, reacting 0.15-0.35 s late. On top of that come wandering tilts, sharp punches of up to the full stick held for 0.2-1 s, yaw wandering, and spins of 90-200 deg/s. How much of each is set per episode by an aggressiveness from 0 to 1. In 20 % of episodes the pilot only keeps the drone in view.
+
+**Randomized per episode** (`althold.randomize`, `link`, `noise`, `aero`, which override the drone's own ranges for this task):
+
+| Group | What | Range |
+|---|---|---|
+| Drone | mass | ×0.85-1.2 |
+| | battery thrust, and its sag during the episode | ×0.85-1.15, then 0-8 % lost over 20 s |
+| | throttle curve: `thrust_expo`, `thrust_u0`, `max_thrust_ratio` | 1.3-1.8, 0.02-0.08, 2.6-3.8 |
+| | motor lag, rising and falling drawn apart | ×0.6-1.5 each |
+| | inertia (the FC's tuning stays nominal) | ×0.7-1.5 |
+| | drag | ×0.5-2 |
+| Air | slowly wandering gusts | 0-0.4 m/s² |
+| | translational lift | +0-10 % thrust per m/s of horizontal speed, up to 1.5 m/s |
+| | thrust loss when sinking faster than 0.5 m/s | 0-15 % per m/s |
+| Response to the sticks | `level_kp`, `angle_ff`, `rc_tau`, `rate_tau` | ×0.7-1.3, 0.4-1.0, ×0.7-1.5, ×0.7-1.5 |
+| | real angle per commanded angle | ×0.85-1.15 |
+| | level trim error | ±4° |
+| | command delay | 20-90 ms |
+| Camera and link | altitude / climb-rate noise | 2-10 mm / 8-25 mm/s |
+| | latency, dropped frames | 20-70 ms, 0-15 % |
+| | outages | 0-0.2 per s, each 0.1-0.5 s long |
+| | depth scale error | ±3 % |
+| | laptop loop | ±3 ms jitter, 1 % of ticks missed |
+
+Ground effect is not modelled, because hovering stays above 0.4 m. Neither is a thrust mismatch between motors: the simulated rate loop has no I-term, so the mismatch would hold the drone tilted, and the trim error already covers that.
+
+**Curriculum**: early in training every draw is pulled towards nominal, and the pilot is kept calm. `train.py --curriculum START UNTIL` (default `0.2 0.4`) starts at 20 % of the ranges and reaches the full ranges after 40 % of the timesteps. TensorBoard shows the level as `curriculum/difficulty`. Evaluation always runs at the full ranges. `1 0` turns the curriculum off.
+
+**Evaluation**: `evaluate_althold.py` scores the policy and a hand-tuned PI under three conditions: nominal, randomized, and hard (full ranges with the pilot at full aggressiveness). It reports survival, the RMS and 95th percentile of the true altitude error, and throttle chatter. It also plots altitude, throttle, camera age, and the sticks against the true attitude. The PI's scores (30 episodes) are the bar a policy has to clear:
+
+| Condition | Survival | RMS error |
+|---|---|---|
+| nominal | 100 % | 3.4 cm |
+| randomized | 100 % | 12 cm |
+| hard | 80 % | 6 cm |
+
+**Flying it in rc_sim**:
+1. Take off on your own throttle.
+2. Press Enter to engage, or use a radio switch with `--engage-axis N` (high = on). The HUD shows the target and the camera altitude. Your throttle stick is ignored until you disengage, and disarming also disengages.
+
+Options:
+- `--camera-timeout` sets the timeout.
+- `--randomize` draws a random drone as in training.
+- The thrust curve is the one in `params.yaml`, as in training, unless you pass `--soft-cap`.
+
+Before flying the real drone, check that the pilot's sticks reach Betaflight at its full `angle_limit` (20°). That is the scale the policy was trained with, not skybridge's 15° `safety.max_angle`.
+
 ### System identification
 
 The model is fitted to recorded data. See [`sysid/README.md`](sysid/README.md) for the pipeline and the current results.
@@ -142,7 +224,7 @@ pip install gymnasium stable-baselines3 mujoco numpy scipy matplotlib pyyaml
 python train.py
 ```
 
-This trains a PPO policy with:
+`--drone` picks the drone, and `--task althold` trains the Air65 altitude hold (see above). This trains a PPO policy with:
 
 - **Policy network**: MLP with 2 hidden layers of 128 units (ReLU activation)
 - **16 parallel environments** for experience collection

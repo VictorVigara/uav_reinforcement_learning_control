@@ -43,6 +43,8 @@ cd ~/uav_reinforcement_learning_control
 # Run training
 # DRONE picks the drone from drones/ (default: the 150 g drone), e.g.
 #   DRONE=air65 bsub < train.sh
-python3 train.py --drone "${DRONE:-small}"
+# TASK picks the task (default: hover), e.g. the Air65 altitude hold:
+#   DRONE=air65 TASK=althold bsub < train.sh
+python3 train.py --drone "${DRONE:-small}" --task "${TASK:-hover}"
 
 echo "Training completed"

@@ -35,7 +35,7 @@ def load_env(model_dir: str, **env_kwargs):
     print(f"Drone: {drone or 'default'}, wrapper: {wrapper_name}")
     if drone and config.get("drone_params"):
         drone = spec_from_params(drone, config["drone_params"])
-    env = make_env(drone, wrapper=get_wrapper(wrapper_name), **env_kwargs)
+    env = make_env(drone, wrapper=get_wrapper(wrapper_name), task=config.get("task", "hover"), **env_kwargs)
     return env, config
 
 

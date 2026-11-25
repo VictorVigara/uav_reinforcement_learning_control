@@ -2,6 +2,7 @@ from drones import DroneSpec, resolve
 
 from .hover_env import HoverEnv
 from .angle_env import AngleModeEnv
+from .althold_env import AltHoldEnv, AltHoldObserver, AltHoldAssist
 from .wrappers import RelPosActWrapper, get_wrapper
 from .rate_wrapper import RateControlWrapper
 
@@ -18,17 +19,25 @@ DEFAULT_WRAPPER = {
 }
 
 
-def make_env(drone: str | DroneSpec | None = None, wrapper=None, **kwargs):
+# Tasks other than flying to a target, by name.
+TASKS = {
+    "althold": AltHoldEnv,      # pilot flies roll/pitch/yaw, the policy holds altitude with throttle
+}
+
+
+def make_env(drone: str | DroneSpec | None = None, wrapper=None, task: str = "hover", **kwargs):
     """Build the environment for a drone from the registry.
 
     `wrapper` is a wrapper class, a name from the wrapper registry, or None.
+    `task` is "hover" (the drone's own environment) or a name from TASKS.
     """
     spec = resolve(drone)
-    env = ENV_FOR_INTERFACE[spec.interface](drone=spec, **kwargs)
+    env_cls = ENV_FOR_INTERFACE[spec.interface] if task == "hover" else TASKS[task]
+    env = env_cls(drone=spec, **kwargs)
     if isinstance(wrapper, str):
         wrapper = get_wrapper(wrapper)
     return wrapper(env) if wrapper else env
 
 
-__all__ = ["HoverEnv", "AngleModeEnv", "RelPosActWrapper", "RateControlWrapper", "get_wrapper",
+__all__ = ["HoverEnv", "AngleModeEnv", "AltHoldEnv", "AltHoldObserver", "AltHoldAssist", "TASKS", "RelPosActWrapper", "RateControlWrapper", "get_wrapper",
            "make_env", "ENV_FOR_INTERFACE", "DEFAULT_WRAPPER"]

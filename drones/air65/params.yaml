@@ -105,3 +105,83 @@ reward:
   action_rate: 0.5          # cost on the squared change of the normalized action (was 0.05: negligible)
   velocity: 0.05            # cost on the squared velocity, m^2/s^2: penalises oscillating around the target
   heading: 0.05             # cost on the squared heading error / pi
+
+# ── Altitude hold (envs/althold_env.py): the pilot flies roll/pitch/yaw, the policy throttle ──
+# The policy sees no attitude telemetry: the pilot's sticks stand in for it. Ranges here
+# override or extend the ones above for this task only. [a, b] is drawn per episode,
+# a scalar r means nominal +- r. A curriculum (train.py) pulls every draw towards
+# nominal early in training and widens it to these ranges.
+althold:
+  episode_steps: 1000       # 20 s at 50 Hz: long enough for the battery sag to matter
+  throttle_range: [0.05, 0.56]
+  stick_history: 5          # stick commands in the observation (100 ms)
+  throttle_history: 10      # throttle commands in the observation (200 ms)
+  obs: {err: 1.0, vz: 2.0, int: 0.5, age: 0.5}   # m, m/s, m s, s
+  int_zone: 0.3             # m: the error integral only grows within this of the target
+  start_xy: 0.6             # m
+  start_z: [0.4, 1.4]       # m, where the policy is engaged
+  start_vz: [-0.5, 0.5]     # m/s, the pilot was not quite holding altitude
+  start_tilt_deg: 10.0
+  start_throttle_error: 0.1 # the pilot's throttle at hand-over, x(1 +- this) of hover
+  target_offset: [-0.3, 0.3]    # m, in this share of episodes the target is off the
+  target_offset_share: 0.5      # engagement altitude (practice coming back after a sag)
+  z_bounds: [0.05, 2.2]     # m: floor and ceiling end the episode
+  max_tilt_deg: 75.0
+
+  randomize:
+    mass: [0.85, 1.2]
+    thrust_sag: [0.0, 0.08]       # battery: share of thrust lost over the episode
+    thrust_expo: [1.3, 1.8]       # [bbl] 1.67 vs [flight] 1.4
+    thrust_u0: [0.02, 0.08]
+    max_thrust_ratio: [2.6, 3.8]
+    motor_tau_up: [0.6, 1.5]      # x nominal, drawn apart from motor_tau_down
+    motor_tau_down: [0.6, 1.5]
+    inertia: [0.7, 1.5]           # x nominal; the FC's tuning stays nominal
+    level_kp: [0.7, 1.3]          # x nominal
+    angle_ff: [0.4, 1.0]
+    rc_tau: [0.7, 1.5]            # x nominal
+    rate_tau: [0.7, 1.5]          # x nominal
+    angle_scale: [0.85, 1.15]     # real angle / commanded angle
+    angle_trim_deg: 4.0
+    translational_lift: [0.0, 0.10]   # thrust gain per m/s of horizontal speed (up to 1.5 m/s)
+    descent_loss: [0.0, 0.15]     # thrust lost when sinking 1 m/s faster than 0.5 m/s
+    depth_scale: 0.03             # camera depth scale error
+
+  link:
+    action_delay: [0.02, 0.09]
+    camera_latency: [0.02, 0.07]
+    camera_drop: [0.0, 0.15]
+    outage_rate: [0.0, 0.2]       # camera outages per second ...
+    outage_duration: [0.1, 0.5]   # ... lasting this long, s
+    loop_jitter: 0.003            # s, +- on when a command leaves the laptop
+    missed_step: 0.01             # share of RC ticks the laptop misses
+
+  noise:
+    position: [0.002, 0.010]      # m
+    velocity: [0.008, 0.025]      # m/s
+
+  aero:
+    gust_accel: [0.0, 0.4]        # m/s^2
+
+  pilot:
+    aggressiveness: [0.0, 1.0]
+    calm_share: 0.2               # episodes where the pilot only keeps the drone in view
+    return_kp: [0.5, 1.5]         # 1/s^2, pull back to the centre of the view
+    return_kd: [0.8, 1.6]         # 1/s
+    reaction_s: [0.15, 0.35]
+    wander: 0.6                   # x full stick, 1 sigma at full aggressiveness
+    wander_tau: [0.3, 2.0]        # s
+    punch_rate: 0.4               # per s at full aggressiveness
+    punch_s: [0.2, 1.0]
+    yaw_wander_dps: 60.0
+    spin_rate: 0.1                # per s at full aggressiveness
+    spin_dps: [90.0, 200.0]
+    stick_noise: 0.003            # x full stick
+
+  reward:
+    alive: 0.2
+    alt_scale: 0.3                # m, broad term
+    alt_fine: 1.0
+    alt_fine_scale: 0.05          # m, narrow term
+    climb: 0.1                    # cost on true vz^2
+    action_rate: 1.0              # cost on the squared change of the normalized throttle

@@ -26,6 +26,10 @@ class BetaflightParams:
     thrust_u0: float = 0.047        # thrust ~ (bf_throttle + u0) ** expo
     thrust_expo: float = 1.67
     max_thrust_ratio: float = 3.4   # per-motor thrust ceiling / hover thrust
+    thrust_soft_cap: float = 0.0    # 0: the curve is cut off at the ceiling. n > 0: it bends smoothly
+                                    # into it, ratio / (1 + (ratio / ceiling)^n)^(1/n) (scaled to 1 at
+                                    # hover), so full thrust comes near full stick, as Betaflight
+                                    # spreads motor output over the whole stick
     motor_tau_up: float = 0.03      # s, in rpm (thrust = rpm^2)
     motor_tau_down: float = 0.05
     # ── attitude ──
@@ -86,16 +90,30 @@ class BetaflightAngleController:
     def _bf_throttle(self, u: float) -> float:
         return min(max((u - self.p.min_check) / (1.0 - self.p.min_check), 0.0), 1.0)
 
+    def _cap(self, ratio: float) -> float:
+        p = self.p
+        if p.thrust_soft_cap > 0.0:     # normalized so hover thrust stays at the measured hover throttle
+            n, top = p.thrust_soft_cap, p.max_thrust_ratio
+            bend = lambda r: r / (1.0 + (r / top) ** n) ** (1.0 / n)
+            return min(bend(ratio) / bend(1.0), top)
+        return min(ratio, p.max_thrust_ratio)
+
     def motor_thrust_for(self, throttle: float) -> float:
         """Steady thrust per motor (N) at this throttle, all motors equal."""
         p = self.p
         ratio = ((self._bf_throttle(throttle) + p.thrust_u0) / self._hover_base) ** p.thrust_expo
-        return self._unit * min(ratio, p.max_thrust_ratio)
+        return self._unit * self._cap(ratio)
 
     def throttle_for_hover(self, mass: float, g: float = 9.81) -> float:
         """Throttle that holds `mass` level at the current battery state."""
         p = self.p
         ratio = (mass * g / 4.0) / self._unit
+        if p.thrust_soft_cap > 0.0:     # invert the soft cap (it is monotonic) by bisection
+            lo, hi = 0.0, 1.0
+            for _ in range(40):
+                mid = 0.5 * (lo + hi)
+                lo, hi = (mid, hi) if self.motor_thrust_for(mid) < ratio * self._unit else (lo, mid)
+            return 0.5 * (lo + hi)
         bf = ratio ** (1.0 / p.thrust_expo) * self._hover_base - p.thrust_u0
         return min(max(bf * (1.0 - p.min_check) + p.min_check, 0.0), 1.0)
 
