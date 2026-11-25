@@ -9,6 +9,7 @@ Quadrotor hovering control using **Proximal Policy Optimization (PPO)** with **M
 ├── train.py                  # Training script (PPO via Stable Baselines3)
 ├── evaluate.py               # Evaluation, visualization, and plotting
 ├── evaluate_althold.py       # Altitude-hold policy vs a PI baseline, with plots
+├── export_policy.py          # Altitude-hold policy -> numpy bundle for skybridge
 ├── rc_sim.py                 # Fly the simulated Air65 with the real radio (optionally with altitude hold)
 ├── optimize.py               # Optuna hyperparameter optimization for PPO
 ├── debug_training.py         # Diagnostic tool for early episode termination
@@ -197,16 +198,127 @@ Ground effect is not modelled, because hovering stays above 0.4 m. Neither is a 
 | randomized | 100 % | 12 cm |
 | hard | 80 % | 6 cm |
 
-**Flying it in rc_sim**:
-1. Take off on your own throttle.
-2. Press Enter to engage, or use a radio switch with `--engage-axis N` (high = on). The HUD shows the target and the camera altitude. Your throttle stick is ignored until you disengage, and disarming also disengages.
+### Deploying the altitude hold: from a trained run to the real drone
 
-Options:
-- `--camera-timeout` sets the timeout.
-- `--randomize` draws a random drone as in training.
-- The thrust curve is the one in `params.yaml`, as in training, unless you pass `--soft-cap`.
+The policy goes to the drone unchanged, with no tuning on the real drone. Each step below either catches a problem in simulation, or checks that the laptop feeds the policy exactly what it was trained on. Do them in order.
 
-Before flying the real drone, check that the pilot's sticks reach Betaflight at its full `angle_limit` (20°). That is the scale the policy was trained with, not skybridge's 15° `safety.max_angle`.
+#### 1. Train
+
+```bash
+python train.py --drone air65 --task althold --timesteps 10000000 --n-envs 8
+# cluster: DRONE=air65 TASK=althold bsub < train.sh
+```
+
+In TensorBoard (`tensorboard --logdir logs/`), `curriculum/difficulty` reaches 1.0 at 40 % of the run. Watch `eval/mean_reward` and `eval/mean_ep_length` after that point: evaluation always runs at the full ranges. A full episode is 1000 steps and scores about 2000 at most.
+
+#### 2. Evaluate in simulation
+
+**a. Score it against the PI baseline:**
+
+```bash
+python evaluate_althold.py models_trained/air65_althold_<stamp> --episodes 50 --plot 3
+```
+
+| Condition | What it tests |
+|---|---|
+| `nominal` | the identified drone, sensor noise on |
+| `randomized` | the full training ranges: other drones, batteries, delays, camera faults |
+| `hard` | full ranges, with the pilot at full aggressiveness every episode |
+
+Only move on if, in **every** condition, the policy:
+- survives at least as often as the PI (100 / 100 / 80 %);
+- has a lower RMS error than the PI (3.4 / 12 / 6 cm);
+- has a throttle chatter (mean |Δthrottle| per tick) of the same order as the PI's. A policy that wins on error by buzzing the throttle will heat the motors, and will look worse on the real drone than in the sim.
+
+**b. Look at the plots** in `plots/althold_<run>/`:
+- Altitude should settle on the target without a slow oscillation. A 1-2 s bounce means the delays are not handled.
+- Throttle should be smooth, and should step up *before* the drone sinks when a stick punch starts. That shows it uses the stick history.
+- Through camera outages (the age trace spikes), throttle should stay roughly steady, not drift or jump.
+
+**c. Fly it with your radio** (Boxer plugged in, "USB Joystick" mode):
+
+```bash
+python rc_sim.py --policy models_trained/air65_althold_<stamp>
+python rc_sim.py --policy models_trained/air65_althold_<stamp> --randomize   # a random drone each reset (R)
+```
+
+1. Arm, take off on your own throttle and hover.
+2. Press Enter to engage, or use `--engage-axis N` for a radio switch, high = on. The HUD shows `ALT HOLD <target> (cam <z>, <age> ms)`. Your throttle stick is ignored until you disengage, and disarming also disengages.
+3. Fly the way you will on the real drone: slow drifts, sharp punches to full stick, yaw spins, flying to the edge of the room and back. Altitude should hold within a few cm in a hover, and dip by no more than a few cm in a punch.
+4. Do it again with `--randomize` a few times (R resets with a new draw), and with `--hover-throttle 0.33` for a sagging battery.
+
+Options: `--camera-timeout` (default 1 s) and `--delay` for a fixed link delay. The thrust curve is `params.yaml`'s, as in training, unless you pass `--soft-cap`.
+
+If anything here looks wrong, fix it in the sim: rewards, ranges, more training. Don't take it to the drone hoping it behaves better there.
+
+**d. Replay it on recorded real flights against the PID** (after exporting, step 3, and enabling it in skybridge, step 4):
+
+```bash
+cd ~/skybridge
+uv run python scripts/control_replay.py data/live/<run>_flight.rrd \
+    --controller altitude_hold --controller altitude_policy --set altitude_policy.on_timeout=pilot
+```
+
+This runs both controllers on the same recorded flight: real camera heights, your real sticks, real noise and track dropouts. It prints, for each controller, how its throttle compares with what you flew and with each other, and opens Rerun with height, all throttles and their differences. It is **open loop**: neither output flew the drone, so this shows how each reacts to real data, not whether it would have held altitude. Look for a policy throttle that is smooth and close to the PID's, and doesn't jump when the track drops. Large or jerky differences point at a gap between the sim and the real sensor data.
+
+#### 3. Export
+
+```bash
+python export_policy.py models_trained/air65_althold_<stamp> -o ~/skybridge/models/althold_policy.npz
+```
+
+This writes a numpy-only bundle: the actor's weights, the observer settings, and up to 900 recorded observer calls from three simulated episodes. Before writing anything, it checks two things:
+- the observer this code builds is the one the run was trained with;
+- the numpy forward pass matches SB3 (it prints the largest difference, normally around 1e-9).
+
+#### 4. Install in skybridge
+
+1. In `~/skybridge/configs/drone.yaml`, the `altitude_policy` entry is at the end of `control.controllers`, on **CH7 high**. The PID `altitude_hold` is on **CH7 middle**, so flipping up goes off → PID → policy, and flipping down from the policy lands on the PID first.
+2. Check that `drone.yaml` still says `angle_limit: 20`, yaw `srate: 67` and `rc_hz: 50`, and that Betaflight agrees (`diff all`).
+
+When `--control` starts, skybridge loads the bundle and refuses to start if:
+- it is missing;
+- replaying the recorded calls through skybridge's own copy of the observer and network gives anything else. **If you change `AltHoldObserver` in `envs/althold_env.py`, change `skybridge/control/policy.py` the same way, then re-export**;
+- the stick scaling or RC rate in `drone.yaml` differs from training.
+
+rc_fly forwards the sticks raw, so full stick is Betaflight's `angle_limit` (20°). That is the scale the policy was trained with, not skybridge's 15° `safety.max_angle`.
+
+#### 5. Bench test, props off
+
+```bash
+cd ~/skybridge
+uv run python scripts/rc_fly.py --dry-run --perception --control --replay data/realsense/<stem>.rrd
+```
+
+This uses a recorded flight instead of the camera, and nothing is transmitted. Arm, put CH7 in the middle (PID), then high (policy), and check:
+- the status line shows `ALT-RL <z>><target>m T<throttle>%`, with a throttle near your hover;
+- moving the throttle stick more than 30 % of its travel hands back (`throttle stick moved`);
+- when the recording loses the drone, `ALT-RL NO CAMERA` appears after 1 s and throttle goes to 0 until CH7 is cycled.
+
+Then do the same live with the camera and the drone on the desk, props off, still with `--dry-run`. Lift the drone by hand while engaged: the throttle should go down. Lower it: the throttle should go up.
+
+#### 6. First flight
+
+```bash
+uv run python scripts/rc_fly.py --perception --control --max-throttle 0.6 --record
+```
+
+- Someone at the laptop, ready to press Ctrl-C (see skybridge's README: a frozen radio can't be detected yet).
+- Fully charged battery. The policy adapts to sag, but the first flight shouldn't test that.
+- Hover at about 1 m in the middle of the camera's view, with a `detected` track. Flip CH7 to the middle (PID hold) and let it settle, then flip CH7 high (policy). While the PID holds, the policy runs in **shadow mode**: the status line shows `[shadow ALT-RL ... T42%]`, the throttle it would send, without sending it. With `--record` it is logged next to the PID's. Stay on the PID until that throttle looks close to the PID's and smooth. Keep your hands off the sticks for 10 s, then make small roll and pitch moves, and only then bigger ones.
+- Keep the throttle stick near hover the whole time. It is what you get back when you cycle CH7, or when a stick move or height error hands control back.
+- **If the camera times out, throttle goes to 0.** Flip CH7 down to the middle at once: the PID takes over if the track is back, otherwise you get your stick. With `on_timeout: pilot` in `drone.yaml` you get the stick back automatically instead.
+
+#### 7. After the flight
+
+`--record` logs the controller's debug values (`plots/control/altitude_policy`: setpoint, z, climb rate, integral, data age, raw action, throttle) next to the sticks and the depth.
+
+Compare them with step 2:
+- **Oscillates where the sim didn't:** the delays are longer than trained. Widen `althold.link.action_delay` and `camera_latency`, and retrain.
+- **Settles off target for long:** the hover throttle is outside the trained range. Check `mass` and `thrust`.
+- **Jumps through outages:** they are longer or more frequent than `outage_rate` and `outage_duration` allow.
+
+Feed what you measure back into `drones/air65/params.yaml` (the `sysid/` scripts help), retrain, and go through the steps again.
 
 ### System identification
 

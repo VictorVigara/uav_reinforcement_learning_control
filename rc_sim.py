@@ -37,8 +37,12 @@ of sight from behind. Move the pilot with --eye / --look, the room with --room.
 
 Altitude hold with a trained policy (--policy): you fly roll, pitch and yaw, the
 policy flies throttle. Engage in the air with Enter (or a radio switch, see
---engage-axis): it holds the altitude the simulated camera reads at that moment,
-and your throttle stick is ignored until you disengage. If the camera data gets
+--engage-axis): it holds the altitude the simulated camera reads at that moment.
+The rules are skybridge's: it refuses to engage on the ground, with stale camera
+data, below 15 % throttle or climbing/sinking faster than 0.5 m/s; it hands the
+throttle back if you move the stick more than --stick-override (0.3) from where it
+was at engage, or the height error passes --max-error; after that it stays off
+until you press Enter (or cycle the switch) again. If the camera data gets
 older than --camera-timeout the throttle goes to zero and stays there until you
 disengage and engage again, as it will on the real drone.
 
@@ -48,6 +52,8 @@ Usage:
     python rc_sim.py --randomize            # a random drone/battery/delay draw, as in training
     python rc_sim.py --hover-throttle 0.32  # e.g. a sagging battery
     python rc_sim.py --record flight.npz    # save sticks and true state for comparison
+    python rc_sim.py --policy <run> --plot  # a PNG of the flight when you close the sim
+    python rc_sim.py --replot flight.npz    # plot a recorded flight again, no radio needed
     python rc_sim.py --max-thrust 2.5 --drag-z 0.8   # start from other thrust settings
 """
 from __future__ import annotations
@@ -328,6 +334,68 @@ class RcSim:
             self.arm_allowed = False
 
 
+# ── plot ─────────────────────────────────────────────────────────────────────
+def plot_flight(log: dict, path) -> Path:
+    """Altitude, throttle, sticks vs true attitude and camera age, with altitude hold shaded."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    t = np.asarray(log["t"]) - log["t"][0]
+    state, command = np.asarray(log["state"]), np.asarray(log["command"])
+    hold = np.asarray(log.get("hold", np.zeros(t.size)), dtype=bool)
+    get = lambda key: np.asarray(log[key]) if key in log else np.full(t.size, np.nan)
+
+    fig, ax = plt.subplots(4, 1, figsize=(12, 10), sharex=True,
+                           gridspec_kw={"height_ratios": [3, 2, 2, 1]})
+    def shade(a):
+        edges = np.flatnonzero(np.diff(np.r_[0, hold.astype(int), 0]))
+        for start, end in zip(edges[::2], edges[1::2]):
+            a.axvspan(t[start], t[min(end, t.size) - 1], color="tab:green", alpha=0.08, lw=0)
+    for a in ax:
+        shade(a)
+
+    ax[0].plot(t, state[:, 2], label="true z")
+    ax[0].plot(t, get("z_meas"), lw=0.8, alpha=0.7, label="camera z")
+    ax[0].plot(t, get("target"), "k--", label="target")
+    err = state[:, 2] - get("target")
+    if hold.any() and np.isfinite(err).any():
+        e = err[hold & np.isfinite(err)]
+        ax[0].set_title(f"altitude hold (green): rms {np.sqrt(np.mean(e ** 2)) * 100:.1f} cm, "
+                        f"max {np.max(np.abs(e)) * 100:.1f} cm over {hold.sum() * 0.02:.0f} s", fontsize=10)
+    ax[0].set_ylabel("altitude, m")
+    ax[0].legend(loc="upper right", ncol=3)
+
+    ax[1].plot(t, get("stick_throttle"), color="0.6", label="throttle stick")
+    ax[1].plot(t, command[:, 0], label="throttle sent")
+    timed_out = get("timed_out").astype(float) > 0
+    if timed_out.any():
+        ax[1].plot(t[timed_out], command[timed_out, 0], "rx", ms=3, label="camera timeout")
+    if hold.any():
+        sent = command[hold, 0]
+        ax[1].set_title(f"while holding: mean |change| {np.mean(np.abs(np.diff(sent))):.4f} per tick",
+                        fontsize=10)
+    ax[1].set_ylabel("throttle")
+    ax[1].legend(loc="upper right", ncol=3)
+
+    ax[2].plot(t, np.degrees(command[:, 1]), label="roll stick")
+    ax[2].plot(t, np.degrees(command[:, 2]), label="pitch stick")
+    ax[2].plot(t, np.degrees(state[:, 3]), ":", label="true roll")
+    ax[2].plot(t, np.degrees(state[:, 4]), ":", label="true pitch")
+    ax[2].set_ylabel("deg")
+    ax[2].legend(loc="upper right", ncol=4)
+
+    ax[3].plot(t, get("age") * 1000, color="tab:red", lw=0.8)
+    ax[3].set_ylabel("camera age, ms")
+    ax[3].set_xlabel("s")
+    fig.tight_layout()
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+    return path
+
+
 # ── viewer decorations ──────────────────────────────────────────────────────
 class Room:
     """A room drawn around the flight space: floor grid (1 m), side walls, far wall, takeoff pad.
@@ -409,6 +477,10 @@ def main():
     ap.add_argument("--delay", type=float, help="radio link delay in seconds (default: params.yaml / nominal)")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--record", type=Path, help="save sticks, command and true state to this .npz")
+    ap.add_argument("--plot", nargs="?", const="", metavar="PNG",
+                    help="on exit, plot the flight: altitude, throttle, sticks vs attitude, camera age "
+                         "(default file: plots/rc_sim/<time>.png)")
+    ap.add_argument("--replot", type=Path, metavar="NPZ", help="plot a --record file and exit")
     ap.add_argument("--max-thrust", type=float, help="max thrust / hover thrust (params.yaml: max_thrust_ratio)")
     ap.add_argument("--thrust-expo", type=float, help="thrust ~ throttle^expo (params.yaml: thrust_expo)")
     ap.add_argument("--drag-z", type=float, help="vertical drag, 1/s (params.yaml: aero.drag_z)")
@@ -418,6 +490,11 @@ def main():
     ap.add_argument("--policy", type=Path, help="altitude-hold run directory (or .zip): the policy flies throttle")
     ap.add_argument("--engage-axis", type=int, help="radio axis index of a switch that engages altitude hold "
                     "(high = on); default: the Enter key toggles it")
+    ap.add_argument("--stick-override", type=float, default=0.3,
+                    help="moving the throttle stick this far (0..1) from where it was at engage hands "
+                         "it back, as in skybridge (default %(default)s)")
+    ap.add_argument("--max-error", type=float, default=0.6,
+                    help="m from the target: beyond this altitude hold hands the stick back (default %(default)s)")
     ap.add_argument("--camera-timeout", type=float, default=1.0,
                     help="s: camera data older than this -> throttle 0 until re-engaged (default %(default)s)")
     ap.add_argument("--eye", type=float, nargs=3, default=[-2.0, 0.0, 1.6], metavar=("X", "Y", "Z"),
@@ -428,6 +505,10 @@ def main():
     ap.add_argument("--room", type=float, nargs=3, default=[6.0, 5.0, 3.0], metavar=("LENGTH", "WIDTH", "HEIGHT"),
                     help="room size, m; it starts 0.5 m behind the pilot")
     args = ap.parse_args()
+    if args.replot:
+        log = {k: v for k, v in np.load(args.replot).items()}
+        print(f"wrote {plot_flight(log, args.plot or args.replot.with_suffix('.png'))}")
+        return
 
     sky_path, live = skybridge_config_path("air65")
     sky = yaml.safe_load(sky_path.read_text())
@@ -492,7 +573,9 @@ def main():
         elif key in tune_keys:
             keys["tune"].append(tune_keys[key])
 
-    log = {k: [] for k in ("t", "axes", "command", "armed", "state", "motors", "hold", "z_meas")} if args.record else None
+    log = ({k: [] for k in ("t", "axes", "command", "armed", "state", "motors", "hold", "z_meas",
+                            "stick_throttle", "target", "age", "timed_out")}
+           if args.record or args.plot is not None else None)
     setup_visuals(env.model, args.fov)
     length, width, height = args.room
     back = args.eye[0] - 0.5
@@ -501,6 +584,29 @@ def main():
                                           show_left_ui=False, show_right_ui=False)
     look_from(viewer.cam, args.eye, args.look)
     follow = False
+
+    hold = {"stick": 0.0, "note": "", "blocked": False}
+
+    def drop(reason: str):
+        """Hand the throttle back. Like skybridge, it stays off until the request is cycled."""
+        if assist.engaged:
+            assist.disengage()
+        hold["note"], hold["blocked"] = f"{reason}, {'flip the switch' if args.engage_axis is not None else 'press Enter'} to retry", True
+        keys["hold"] = False if args.engage_axis is None else keys["hold"]
+        print(f"\naltitude hold off: {reason}")
+
+    def engage_refusal(sim, throttle: float, vz: float, age: float) -> str:
+        if not sim.armed or sim.crashed:
+            return "not armed"
+        if sim.on_ground:
+            return "on the ground"
+        if age > 0.2:
+            return f"camera data {age:.2f} s old"
+        if throttle < 0.15:
+            return "throttle too low"
+        if abs(vz) > 0.5:
+            return f"moving too fast ({vz:+.1f} m/s)"
+        return ""
 
     period = env.control_dt
     next_tick = time.perf_counter()
@@ -533,17 +639,31 @@ def main():
                 look_from(viewer.cam, args.eye, args.look)     # every tick: the mouse cannot move it
 
             command = sticks.command(axes)
+            stick_throttle = float(command[0])
             sim.update_arming(sticks.arm_switch(axes), command[0])
             if assist is not None:
+                # The same rules as skybridge's altitude_policy controller.
                 want = (axis_us(axes[args.engage_axis]) > 1700 if args.engage_axis is not None
                         and args.engage_axis < len(axes) else keys["hold"])
-                can = sim.armed and not sim.crashed and not sim.on_ground
                 z_meas, vz_meas, age = env.altitude_measurement()
-                if want and can and not assist.engaged:
-                    assist.engage(z_meas, command[0], command[1:4])
-                elif assist.engaged and not (want and can):
-                    assist.disengage()
-                    keys["hold"] = False
+                if not want:
+                    hold["blocked"] = False         # switch off (or Enter): the next request may engage
+                    if assist.engaged:
+                        assist.disengage()
+                        hold["note"] = ""
+                elif not assist.engaged and not hold["blocked"]:
+                    if reason := engage_refusal(sim, command[0], vz_meas, age):
+                        drop(reason)
+                    else:
+                        assist.engage(z_meas, command[0], command[1:4])
+                        hold["stick"], hold["note"] = command[0], ""
+                elif assist.engaged:
+                    if not sim.armed or sim.crashed:
+                        drop("disarmed")
+                    elif abs(command[0] - hold["stick"]) > args.stick_override:
+                        drop("throttle stick moved")
+                    elif not assist.timed_out and abs(assist.observer.target - z_meas) > args.max_error:
+                        drop(f"height error {assist.observer.target - z_meas:+.2f} m")
                 if assist.engaged:
                     command[0] = assist.step(z_meas, vz_meas, age, command[1:4])
             with viewer.lock():
@@ -570,6 +690,8 @@ def main():
                     mode += f"  CAMERA TIMEOUT: throttle 0 (disengage to recover)"
                 elif assist.engaged:
                     mode += f"  ALT HOLD {assist.observer.target:.2f} m (cam {z_meas:.2f}, {age * 1000:.0f} ms)"
+                elif hold["note"]:
+                    mode += f"  alt hold off: {hold['note']}"
                 else:
                     mode += "  alt hold off"
             hud = (f"{state}{mode}\n"
@@ -597,7 +719,12 @@ def main():
                 log["state"].append(np.concatenate([pos, [roll, pitch, yaw], vel, env.data.qvel[3:6]]))
                 log["motors"].append(env.data.ctrl.copy())
                 log["hold"].append(bool(assist and assist.engaged))
-                log["z_meas"].append(env.altitude_measurement()[0] if assist else float("nan"))
+                meas = env.altitude_measurement() if assist else (float("nan"),) * 3
+                log["z_meas"].append(meas[0])
+                log["age"].append(meas[2])
+                log["stick_throttle"].append(stick_throttle)
+                log["target"].append(assist.observer.target if assist and assist.engaged else float("nan"))
+                log["timed_out"].append(bool(assist and assist.engaged and assist.timed_out))
 
             next_tick += period
             delay = next_tick - time.perf_counter()
@@ -614,7 +741,10 @@ def main():
             print("thrust settings flown that differ from drones/air65/params.yaml:")
             for line in changes:
                 print(f"    {line}")
-        if log is not None and log["t"]:
+        if log is not None and log["t"] and args.plot is not None:
+            path = args.plot or Path("plots") / "rc_sim" / f"{time.strftime('%Y%m%d_%H%M%S')}.png"
+            print(f"plot saved to {plot_flight({k: np.asarray(v) for k, v in log.items()}, path)}")
+        if log is not None and log["t"] and args.record:
             np.savez(args.record, **{k: np.asarray(v) for k, v in log.items()},
                      state_names=np.array(["x", "y", "z", "roll", "pitch", "yaw", "vx", "vy", "vz", "wx", "wy", "wz"]))
             print(f"saved {len(log['t'])} ticks to {args.record}")
